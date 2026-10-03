@@ -24,7 +24,6 @@ import (
 	ds "github.com/mariadb-operator/mariadb-operator/v26/pkg/datastructures"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/discovery"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/environment"
-	"github.com/mariadb-operator/mariadb-operator/v26/pkg/hash"
 	mxsclient "github.com/mariadb-operator/mariadb-operator/v26/pkg/maxscale/client"
 	mxsconfig "github.com/mariadb-operator/mariadb-operator/v26/pkg/maxscale/config"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/pod"
@@ -187,24 +186,12 @@ func (r *MaxScaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			reconcile: r.ensurePrimaryServer,
 		},
 		{
-			name:      "Servers",
-			reconcile: r.reconcileChangedServers,
-		},
-		{
-			name:      "Filters",
-			reconcile: r.reconcileChangedFilters,
-		},
-		{
-			name:      "Monitor",
-			reconcile: r.reconcileChangedMonitor,
+			name:      "Config",
+			reconcile: r.reconcileConfigChange,
 		},
 		{
 			name:      "Monitor State",
 			reconcile: r.reconcileMonitorState,
-		},
-		{
-			name:      "Services and Listeners",
-			reconcile: r.reconcileChangedServicesAndListeners,
 		},
 		{
 			name:      "Service State",
@@ -1151,27 +1138,6 @@ func (r *MaxScaleReconciler) ensurePrimaryServer(ctx context.Context, req *reque
 	return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 }
 
-func (r *MaxScaleReconciler) reconcileChangedFilters(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {
-	filtersHash, err := hash.HashJSON(req.mxs.Spec.Filters)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("error hashing spec.Filters: %v", err)
-	}
-	logger := log.FromContext(ctx)
-	if filtersHash == req.mxs.Status.FiltersSpec {
-		logger.V(1).Info("Filters spec did not change. Skipping reconciliation...")
-		return ctrl.Result{}, nil
-	}
-
-	if result, err := r.reconcileFilters(ctx, req, logger); !result.IsZero() || err != nil {
-		return result, err
-	}
-
-	return ctrl.Result{}, r.patchStatus(ctx, req.mxs, func(mss *mariadbv1alpha1.MaxScaleStatus) error {
-		mss.FiltersSpec = filtersHash
-		return nil
-	})
-}
-
 func (r *MaxScaleReconciler) reconcileFilters(ctx context.Context, req *requestMaxScale, logger logr.Logger) (ctrl.Result, error) {
 	if req.client == nil {
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
@@ -1228,27 +1194,6 @@ func (r *MaxScaleReconciler) reconcileFilters(ctx context.Context, req *requestM
 		}
 	}
 	return ctrl.Result{}, err
-}
-
-func (r *MaxScaleReconciler) reconcileChangedServers(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {
-	serversHash, err := hash.HashJSON(req.mxs.Spec.Servers)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("error hashing spec.Servers: %v", err)
-	}
-	logger := log.FromContext(ctx)
-	if serversHash == req.mxs.Status.ServersSpec {
-		logger.V(1).Info("Servers spec did not change. Skipping reconciliation...")
-		return ctrl.Result{}, nil
-	}
-
-	if result, err := r.reconcileServers(ctx, req, logger); !result.IsZero() || err != nil {
-		return result, err
-	}
-
-	return ctrl.Result{}, r.patchStatus(ctx, req.mxs, func(mss *mariadbv1alpha1.MaxScaleStatus) error {
-		mss.ServersSpec = serversHash
-		return nil
-	})
 }
 
 func (r *MaxScaleReconciler) reconcileServers(ctx context.Context, req *requestMaxScale, logger logr.Logger) (ctrl.Result, error) {
@@ -1315,27 +1260,6 @@ func (r *MaxScaleReconciler) reconcileServers(ctx context.Context, req *requestM
 	return ctrl.Result{}, err
 }
 
-func (r *MaxScaleReconciler) reconcileChangedMonitor(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {
-	monitorHash, err := hash.HashJSON(req.mxs.Spec.Monitor)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("error hashing spec.Monitor: %v", err)
-	}
-	logger := log.FromContext(ctx)
-	if monitorHash == req.mxs.Status.MonitorSpec {
-		logger.V(1).Info("Monitor spec did not change. Skipping reconciliation...")
-		return ctrl.Result{}, nil
-	}
-
-	if result, err := r.reconcileMonitor(ctx, req, logger); !result.IsZero() || err != nil {
-		return result, err
-	}
-
-	return ctrl.Result{}, r.patchStatus(ctx, req.mxs, func(mss *mariadbv1alpha1.MaxScaleStatus) error {
-		mss.MonitorSpec = monitorHash
-		return nil
-	})
-}
-
 func (r *MaxScaleReconciler) reconcileMonitor(ctx context.Context, req *requestMaxScale, logger logr.Logger) (ctrl.Result, error) {
 	if req.client == nil {
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
@@ -1380,39 +1304,6 @@ func (r *MaxScaleReconciler) reconcileMonitorState(ctx context.Context, req *req
 			return ctrl.Result{}, fmt.Errorf("error updating monitor state: %v", err)
 		}
 		return ctrl.Result{}, nil
-	})
-}
-
-// When adding new servers, we need to trigger the reconciliation of services for the new servers.
-type servicesHash struct {
-	Services []mariadbv1alpha1.MaxScaleService `json:"services,omitempty"`
-	Servers  []mariadbv1alpha1.MaxScaleServer  `json:"servers,omitempty"`
-}
-
-func (r *MaxScaleReconciler) reconcileChangedServicesAndListeners(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {
-	servicesHash, err := hash.HashJSON(servicesHash{
-		Services: req.mxs.Spec.Services,
-		Servers:  req.mxs.Spec.Servers,
-	})
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("error hashing spec.Services: %v", err)
-	}
-	logger := log.FromContext(ctx)
-	if servicesHash == req.mxs.Status.ServicesSpec {
-		logger.V(1).Info("Services spec did not change. Skipping reconciliation...")
-		return ctrl.Result{}, nil
-	}
-
-	if result, err := r.reconcileServices(ctx, req, logger); !result.IsZero() || err != nil {
-		return result, err
-	}
-	if result, err := r.reconcileListeners(ctx, req, logger); !result.IsZero() || err != nil {
-		return result, err
-	}
-
-	return ctrl.Result{}, r.patchStatus(ctx, req.mxs, func(mss *mariadbv1alpha1.MaxScaleStatus) error {
-		mss.ServicesSpec = servicesHash
-		return nil
 	})
 }
 
@@ -1582,6 +1473,10 @@ func (r *MaxScaleReconciler) reconcileListenerState(ctx context.Context, req *re
 }
 
 func (r *MaxScaleReconciler) reconcileSwitchover(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {
+	if req.mxs.Status.ConfigChange.InProgress(req.mxs.Generation) {
+		log.FromContext(ctx).V(1).Info("Configuration change not committed. Skipping switchover...")
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
 	if req.mxs.Status.PrimaryServer == nil ||
 		req.mxs.Spec.PrimaryServer == nil ||
 		req.mxs.Spec.Monitor.Module != mariadbv1alpha1.MonitorModuleMariadb ||

@@ -94,6 +94,26 @@ func (c *GenericClient[T]) Get(ctx context.Context, name string, options ...Opti
 	return &object.Data, nil
 }
 
+// GetRawData returns the object data as an untyped map, including attributes, relationships and state.
+// It allows callers to compare parameters the typed attributes struct may not model.
+func (c *GenericClient[T]) GetRawData(ctx context.Context, name string, options ...Option) (map[string]any, error) {
+	opts := c.processOptions(options...)
+	res, err := c.client.Get(ctx, c.resourcePath(name), opts.query, opts.rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	var object struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := handleResponse(res, &object); err != nil {
+		return nil, err
+	}
+	if object.Data == nil {
+		return map[string]any{}, nil
+	}
+	return object.Data, nil
+}
+
 func (c *GenericClient[T]) Create(ctx context.Context, name string, attributes T, options ...Option) error {
 	opts := c.processOptions(options...)
 	object := &Object[T]{

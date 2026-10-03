@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: 同一 generation 的 servers、monitor、services 和 listeners 引用关系会在改动活动图前完成验证。
+  - id: 2
+    type: f2p
+    text: 新增或修改对象准备期间，上一版 listener 和 service 继续提供可用入口。
+  - id: 3
+    type: f2p
+    text: 只有所有 MaxScale 副本具备同一可用配置图后才切换入口，并在切换后清理旧代次对象。
+  - id: 4
+    type: f2p
+    text: 任一对象或副本同步失败时保留上一版可服务图，并记录可继续的未完成阶段。
+  - id: 5
+    type: f2p
+    text: 重试和 operator 重启不会重复删除对象，也不会把半成品配置图标记为 Ready。
+  - id: 6
+    type: f2p
+    text: 连续 spec 更新会废弃陈旧 generation 计划，旧结果不会覆盖较新的对象关系。
+  - id: 7
+    type: f2p
+    text: 旧代次清理只删除当前 CR 声明且已被替代的对象，不会删除 MaxScale 中的无关对象。
+  - id: 8
+    type: p2p
+    text: 现有 suspend、switchover 和未改变配置的调谐行为保持原样。

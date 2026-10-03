@@ -657,4 +657,29 @@ var _ = Describe("MaxScale types", func() {
 			Expect(tls.ServerCertSecretRef).To(BeNil())
 		})
 	})
+
+	DescribeTable(
+		"Config change status progress",
+		func(change *MaxScaleConfigChangeStatus, generation int64, expectedInProgress, expectedComplete bool) {
+			Expect(change.InProgress(generation)).To(Equal(expectedInProgress))
+			Expect(change.CompleteFor(generation)).To(Equal(expectedComplete))
+		},
+		Entry("nil change", nil, int64(1), false, false),
+		Entry("in progress for current generation", &MaxScaleConfigChangeStatus{
+			Generation: 1,
+			Stage:      ConfigChangeStagePreparing,
+		}, int64(1), true, false),
+		Entry("completed for current generation", &MaxScaleConfigChangeStatus{
+			Generation: 1,
+			Stage:      ConfigChangeStageCompleted,
+		}, int64(1), false, true),
+		Entry("stale in-flight change for a newer generation", &MaxScaleConfigChangeStatus{
+			Generation: 1,
+			Stage:      ConfigChangeStageSwitching,
+		}, int64(2), false, false),
+		Entry("stale completed change for a newer generation", &MaxScaleConfigChangeStatus{
+			Generation: 1,
+			Stage:      ConfigChangeStageCompleted,
+		}, int64(2), false, false),
+	)
 })

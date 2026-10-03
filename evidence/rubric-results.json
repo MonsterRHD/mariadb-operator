@@ -1,0 +1,42 @@
+[
+  {
+    "id": 1,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 2,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 3,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 4,
+    "passed": false,
+    "reason": "冲突 listener 切换先停止并删除旧入口，创建替代 listener 失败时没有回滚旧入口"
+  },
+  {
+    "id": 5,
+    "passed": false,
+    "reason": "listener 删除与创建完成前不保存切换检查点，进程退出后会从整段切换重新执行"
+  },
+  {
+    "id": 6,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 7,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 8,
+    "passed": true,
+    "reason": ""
+  }
+]

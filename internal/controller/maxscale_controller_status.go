@@ -13,6 +13,7 @@ import (
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/sql"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -115,12 +116,36 @@ func (r *MaxScaleReconciler) reconcileStatus(ctx context.Context, req *requestMa
 
 		mss.Replicas = sts.Status.ReadyReplicas
 
-		condition.SetReadyWithStatefulSet(mss, &sts)
-		if r.isStatefulSetReady(&sts, req.mxs) {
-			condition.SetReadyWithMaxScaleStatus(mss, mss, req.mxs)
-		}
+		r.setMaxScaleReady(mss, req.mxs, &sts)
 		return nil
 	})
+}
+
+// setMaxScaleReady withholds Ready while the generation-scoped configuration change is unfinished;
+// once committed, readiness is derived from the StatefulSet and the observed MaxScale graph.
+func (r *MaxScaleReconciler) setMaxScaleReady(mss *mariadbv1alpha1.MaxScaleStatus,
+	mxs *mariadbv1alpha1.MaxScale, sts *appsv1.StatefulSet) {
+	if change := mss.ConfigChange; change != nil && change.Generation == mxs.Generation &&
+		change.Stage != mariadbv1alpha1.ConfigChangeStageCompleted {
+		reason := mariadbv1alpha1.ConditionReasonMaxScaleConfigChangeInProgress
+		message := fmt.Sprintf("Configuration change in progress: %s", change.Stage)
+		if change.Error != nil && change.Error.Message != "" {
+			reason = mariadbv1alpha1.ConditionReasonMaxScaleConfigChangeFailed
+			message = fmt.Sprintf("Configuration change blocked at %s: %s", change.Stage, change.Error.Message)
+		}
+		mss.SetCondition(metav1.Condition{
+			Type:    mariadbv1alpha1.ConditionTypeReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: message,
+		})
+		return
+	}
+
+	condition.SetReadyWithStatefulSet(mss, sts)
+	if r.isStatefulSetReady(sts, mxs) {
+		condition.SetReadyWithMaxScaleStatus(mss, mss, mxs)
+	}
 }
 
 func (r *MaxScaleReconciler) handleConfigSyncConflict(ctx context.Context, mxs *mariadbv1alpha1.MaxScale,

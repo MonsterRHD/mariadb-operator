@@ -63,6 +63,10 @@ const (
 
 	ConditionReasonMaxScaleNotReady string = "MaxScaleNotReady"
 	ConditionReasonMaxScaleReady    string = "MaxScaleReady"
+	// ConditionReasonMaxScaleConfigChangeInProgress indicates that a generation-scoped configuration change is being applied and Ready is withheld until commit.
+	ConditionReasonMaxScaleConfigChangeInProgress string = "MaxScaleConfigChangeInProgress"
+	// ConditionReasonMaxScaleConfigChangeFailed indicates that a generation-scoped configuration change is blocked and the previous graph is retained.
+	ConditionReasonMaxScaleConfigChangeFailed string = "MaxScaleConfigChangeFailed"
 
 	ConditionReasonRestoreNotComplete string = "RestoreNotComplete"
 	ConditionReasonRestoreComplete    string = "RestoreComplete"

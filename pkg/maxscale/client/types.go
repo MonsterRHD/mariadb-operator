@@ -215,6 +215,11 @@ func IsNotFound(err error) bool {
 	return HasStatusCode(err, http.StatusNotFound)
 }
 
+// IsConflict indicates that an object with the same identity already exists.
+func IsConflict(err error) bool {
+	return HasStatusCode(err, http.StatusConflict)
+}
+
 func HasStatusCode(err error, statusCode int) bool {
 	if clientErr, ok := err.(*Error); ok {
 		return clientErr.HTTPCode == statusCode

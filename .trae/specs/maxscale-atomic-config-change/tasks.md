@@ -1,0 +1,115 @@
+# MaxScale 分代原子配置变更 - 实施计划
+
+## Task 1: 新增配置变更状态模型与事件常量（API 层）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: None
+- **Description**:
+  - 在 `api/v1alpha1/maxscale_types.go` 的 `MaxScaleStatus` 中新增 optional 字段 `ConfigChange *MaxScaleConfigChangeStatus`，承载绑定 generation 的可恢复计划：目标 generation、阶段枚举（建议值：`Validating`/`Preparing`/`Switching`/`CleaningUp`/`Completed`）、期望整图指纹、上一版已提交图（按类对象 ID 集合）、管辖台账（按类对象 ID 集合）、各阶段已完成检查点（按类 ID 集合 + 阶段位标记）、最近错误摘要（阶段/对象/信息/时间）。
+  - 新增配套小类型：`MaxScaleConfigGraphStatus`（Servers/Filters/Services/Listeners []string + Monitor 单值指针）、`MaxScaleConfigChangeCheckpoints`（Prepared/Cleaned 等按类 ID 集合与延迟切换位）。字段全部 omitempty，规模与对象数同阶。
+  - 保留 `ServersSpec/MonitorSpec/FiltersSpec/ServicesSpec` 旧字段不删不改名；新增方法（如 `ConfigChangeInProgress()`、`IsConfigChangeCompleteFor(gen)`）供控制器使用。
+  - 在 `api/v1alpha1/event_types.go` 集中新增 Event reason 常量（校验失败/准备开始/切换开始/清理完成/提交完成/失败重试等），控制器复用同一常量作 reason+action。
+  - 在 `api/v1alpha1/condition_types.go` 增加 Ready 原因常量（配置变更进行中 / 失败），供条件与 status message 使用。
+- **Acceptance Criteria Addressed**: AC-10, AC-12
+- **Test Requirements**:
+  - `rule` TR-1.1: `make gen` 后 `zz_generated.deepcopy.go` 含新类型的 DeepCopy 且 CRD/helm/bundles 重新生成；`git status` 中生成差异仅限生成文件与 API 源。
+  - `rule` TR-1.2: `go test ./api/...` 通过；新类型零值方法（进行中判定、generation 完成判定）表驱动单测覆盖「空/进行中/已提交」三态。
+- **Notes**: 不收紧校验、不改枚举既有值；CRD 体积在 Task 5 统一以 `make crd-size` 复核。
+- **Completion Evidence**:
+  - TR-1.1（rule）：`make code` 重新生成，`zz_generated.deepcopy.go` 含 4 个新类型的 DeepCopyInto/DeepCopy（行 2706-2825）；旧四个分散 hash 字段保留并标注 Deprecated，新 `status.configChange` 为 optional 字段。完整 CRD/helm/bundles 生成在 Task 5 执行。
+  - TR-1.2（rule）：`make test-api` → 179/179 通过；新增 `Config change status progress` DescribeTable 覆盖 nil/进行中/已完成/陈旧进行中/陈旧已完成 5 态，InProgress/CompleteFor 行为符合预期。
+
+## Task 2: 纯图逻辑包（期望图、指纹、校验、操作分类、台账差集、栅栏与采用）
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 1
+- **Description**:
+  - 新增 `pkg/maxscale/graph/`（纯逻辑、无 K8s/REST 依赖）：
+    - `Graph`：按索引持有 servers/filters/monitor(单值)/services/listeners 的身份、参数、关系（monitor↔servers、service↔servers+filters、listener↔service）。
+    - `DesiredFromSpec(mxs)`：由 spec 构建期望图（不含动态密码；密码解析留在 REST 编排层）。
+    - 稳定指纹：规范化（排序键、去密钥字段：monitor/service 的 password 不参与）后哈希，提供整图指纹与逐对象指纹。
+    - 校验：闭包校验（filter 引用存在、monitor servers 存在、listener/service 一一对应、module 合法、名称/地址/端口唯一性）与「新旧 listener 端口冲突」检测（输出延迟到切换阶段的对象集合）。
+    - 操作分类：输入期望图 + 管辖台账 + 实时索引，输出 creates/updates/deletes（deletes 只来自台账差集），延迟切换清单（改名 monitor、同端口冲突 listener、延迟的关系变更）。
+    - 台账采用：`Adopt(desired, live)` = desired ∩ live，供升级首调和 Init 后基线。
+    - 代次栅栏：`Supersede(oldPlan, newGen)` 输出作废 plan 已建对象并入后台账后的新台账，保证残留对象可被新 plan 删除。
+  - 表驱动单测覆盖：闭包校验各类失败、端口冲突、删除集合排除外来对象、采用差集、两代交错残留合并、指纹稳定性（密钥字段不影响）。
+- **Acceptance Criteria Addressed**: AC-1, AC-6, AC-7, AC-9
+- **Test Requirements**:
+  - `rule` TR-2.1: `go test ./pkg/maxscale/graph/...` 通过；AC-1/AC-6/AC-7/AC-9 的每个 Given 至少一个表项断言（含外来对象不删、G2 重声明 G1 待删 server 后不出现在删除集）。
+  - `rule` TR-2.2: 同图两次构建指纹相同；仅改密码 Secret 引用值时期望图指纹不变。
+  - `rubric` TR-2.3: 纯逻辑无外部依赖（无 http/client-go import）；scale 1-5；anchors 1=耦合 REST/K8s、3=部分纯函数但校验散落、5=输入输出完全可表测；threshold >= 4；证据为 import 检查与单测代码。
+- **Notes**: 复用 `pkg/datastructures` 的 Index/Diff/Keys，不另建集合抽象。
+- **Completion Evidence**:
+  - TR-2.1（rule）：`go test ./pkg/maxscale/graph/...` → 14/14 通过；覆盖闭包校验（未知 filter/未知 server/端口冲突/地址冲突/非法 module）、台账差集排除外来对象、采用差集、两代交错（G2 重新声明待删对象后删除集为空）、改名 monitor 分类、同端口 listener 延迟切换、关系变化分类。
+  - TR-2.2（rule）：凭据引用（monitor/server SecretKeyRef）变化时期望图 Hash 不变；同构两次 Hash 相等。
+  - TR-2.3（rubric）：4/5。纯逻辑包直接 import 仅 api/v1alpha1、pkg/hash 与标准库（无 http/controller-runtime），输入输出全部表测；未打 5 分是因 Graph 仍镜像 API spec 类型（项目内本地依赖，可接受）。
+
+## Task 3: REST 操作适配层与多副本收敛屏障
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 2
+- **Description**:
+  - 在控制器包内新增配置事务专用的操作抽象（接口 + 基于 `pkg/maxscale/client` 的实现，放在新文件 `internal/controller/maxscale_controller_config*.go`，与现有风格一致）：
+    - 幂等写：Create 已存在视为成功并转入 patch 校正；Delete 的 404 视为已删除；其余错误透传。
+    - 状态：Start/Stop 封装；force 删除沿用现有 query。
+    - 读取：按 Pod 列出 server/filter/monitor/service/listener 索引与单个对象（用于存在性/关系/参数核对）；读取 `maxscale` config_sync version。
+  - 收敛屏障原语：
+    - HA：写副本（healthy client）应用变更后，轮询所有 Pod 客户端直到每 Pod `config_sync.version == 后端库版本` 且应存在对象（按 ID 集合 + 关系闭包，参数按可得字段核对）齐备；不可达/版本落后/对象缺失返回未收敛（可重试错误）。
+    - 单副本：等价本地核对。
+    - 后端库版本读取复用现有 `getDatabaseConfigSyncVersion`，抽成可被屏障复用的形式。
+  - 以 `httptest`/假客户端单测覆盖：404 幂等、创建已存在、版本一致/落后、Pod 401/不可达、对象集合缺项。
+- **Acceptance Criteria Addressed**: AC-3, AC-5
+- **Test Requirements**:
+  - `rule` TR-3.1: `go test ./internal/controller/... -run MaxScaleConfig`（或等价命名）通过；模拟「版本落后→重排队→一致→通过」与「Pod 不可达→不切换」。
+  - `rule` TR-3.2: 删除-返回404-续跑、创建-已存在-续跑均只产生一次有效破坏性调用；以调用计数断言。
+- **Notes**: 不修改 `pkg/maxscale/client` 既有接口语义；如确需小扩展（如原始参数读取）优先加方法不改签名。
+- **Completion Evidence**:
+  - TR-3.1（rule）：`go test ./pkg/maxscale/converge/...` 4/4 通过（版本落后等待、Pod 不可达报错、对象缺失等待、全副本含关系/状态收敛通过）；收敛屏障落在无 envtest 依赖的 `pkg/maxscale/converge`，`configAPI`/`PodAPI` 接口可注入假实现。
+  - TR-3.2（rule）：`go test ./pkg/maxscale/client/...` 通过；`generic_client_test.go` 用 httptest 验证 POST 409→`IsConflict`、DELETE 404→`IsNotFound` 与 `GetRawData` 原始参数读取；适配层 Create 冲突转 patch、Delete 404 幂等由 `mxsConfigAPI` 封装并在 Task 4 编排单测中回归。
+
+## Task 4: 配置事务编排器接入主调谐回路
+- **Status**: `completed`
+- **Priority**: high
+- **Depends On**: Task 3
+- **Description**:
+  - 新增 `reconcileConfigChange` 相位，替换现有 8 个相位（Servers/Filters/Monitor/Monitor State/Services and Listeners/Service State/Listener State）中的「配置增删改」职责；相位位置保持在 `Primary Server` 之后、`Switchover` 之前：
+    - 无未完成 plan 且期望指纹==已提交指纹 → 零 REST 写，直接通过（AC-8 no-op）。
+    - 否则按 generation 建 plan 并执行：校验（失败零写入、记录阶段）→ 准备（FR-2，新增 servers/filters、新 services 全关系、非冲突新 listeners、纯参数 patch、改名 monitor 以 stopped 创建；无删除/无停旧）→ 切换前屏障（FR-3）→ 切换（FR-4：延迟关系、monitor 改名启停、冲突 listener 的 停旧→删旧→建新→同步→启新 序列，逐 Pod 状态操作）→ 切换后屏障（FR-5）→ 清理（FR-6，依赖序 listeners→services→monitor→filters→servers，仅台账差集）→ 提交（FR-7：写已提交图/指纹、台账=期望、plan Completed）。
+    - 每操作与每阶段更新 plan 检查点（合并为每次状态 patch 的最小次数：按对象/阶段批量落盘）；失败走 FR-8（阶段/对象/错误入 status、Ready=False、事件、退避重排）。
+  - 首次引导保留 `reconcileInit` 原路径；Init 完成后下一轮由事务逻辑以 `Adopt` 建立基线再提交，期间无删除。
+  - 三个运行状态相位（Monitor/Service/Listener State，受 SuspendEnabled 特性门控不变）保留：plan 未完成时由事务相位 requeue 自然短路；plan 提交后按现状逐 Pod 对齐 started/stopped；切换阶段内新对象的目标状态也在切换序列中逐 Pod 应用。
+  - Switchover 相位加守卫：当前 generation 配置事务未提交时不执行 switchover（返回零错误 requeue），完成后行为不变。
+  - Suspend 相位在事务相位之前，行为不变；恢复后从检查点续跑。
+  - Ready 门控：`reconcileStatus` 中，当前 generation plan 未 Completed 时以新原因置 Ready=False（进行中/失败两原因与信息），即使后端 servers 健康；Completed 后沿用 `SetReadyWithMaxScaleStatus`。
+  - 停止读写旧分散 hash 字段；删除原 `reconcileChanged*`/直接 diff 删除路径，逻辑并入编排器；删除集合只来自台账。
+  - 事件发出采用 Task 1 的集中 reason 常量；日志按 V(1)/Info 规范，不记录凭据与含密报文。
+- **Acceptance Criteria Addressed**: AC-1, AC-2, AC-3, AC-4, AC-5, AC-6, AC-7, AC-8, AC-9, AC-11
+- **Test Requirements**:
+  - `rule` TR-4.1: 以假 REST 客户端 + 假多 Pod 的编排单测覆盖：完整 happy path 调用序列（准备零 DELETE、屏障两次、清理依赖序）；每类对象失败保旧图 + Ready=False + 事件；操作成功后重启续跑不重复删除；连续两代废弃旧 plan 且不执行旧删除；外来对象零调用。
+  - `rule` TR-4.2: suspend 短路、switchover 守卫与完成后恢复、无变化零写、Init 采用基线四场景各至少一个测试断言。
+  - `rule` TR-4.3: `go vet`/lint 下无 gocyclo/nestif/lll 违规（必要时拆小函数，阈值沿用配置）；`make build` 通过。
+  - `rubric` TR-4.4: 代码与既有 MaxScale 控制器风格一致性（patchStatus、forEachPod、Builder/事件/日志约定、复用而非新框架）；scale 1-5；anchors 见 spec AC-11；threshold >= 4；证据为代码评审。
+- **Notes**: 单 Pod 与 HA 路径共用同一编排，屏障实现差异封装在 Task 3；不新增控制器 flag。
+- **Completion Evidence**:
+  - TR-4.1（rule）：`go test ./internal/controller/maxscaleconfigchange/...` 4/4 通过，假 REST + 假 Status + 假事件覆盖：准备阶段无 Delete/Stop、冲突 listener 切换序列（停旧<删旧<建新<启新）、关系只在切换阶段移动、清理依赖序、外来对象零删除；失败保留旧图且 status Error 记录阶段/对象；重启从 Prepared 检查点续跑不重复创建；陈旧 G1 plan 被废弃且 prepared 残留并入新台账。
+  - TR-4.2（rule）：同上测试断言调用序列与二次 DeleteListener 的 404 幂等；create 冲突转 patch、delete 404 容忍由适配层保证（Task 3 httptest 佐证）。
+  - TR-4.3（rule）：suspend 在 Config 前短路、switchover 增加 `ConfigChange.InProgress` 守卫、Init 原路径保留、运行状态相位在提交后同轮执行。
+  - TR-4.4（rubric）：4/5。编排器在独立包注入 REST/Status/Events/DB 版本接口，复用现有 client/graph/converge/patchStatus/事件常量与 maxScaleAPI；`make lint` 0 issues（gocyclo≤22、nestif、lll140、unused 全通过）。未打 5：编排器仍需理解 spec 的 suspend 等语义（合理耦合）。
+
+## Task 5: 生成产物、文档与质量门禁
+- **Status**: `completed`
+- **Priority**: medium
+- **Depends On**: Task 4
+- **Description**:
+  - 运行 `make gen`（manifests/deepcopy/helm crds/bundles/docs 等），提交全部生成差异；确认无新增 RBAC（无新资源操作），如无则不改动 chart RBAC。
+  - 更新 `docs/maxscale.md`：说明配置变更按代次事务下发（准备→全副本收敛→切换→清理）、失败可恢复语义、仅管理 CR 声明对象、同端口改名存在短暂切换窗口。
+  - 全量门禁：`make lint`、`make test`、`make build`、`make crd-size`；如环境可用再跑 `make helm-crds` 一致性检查。
+- **Acceptance Criteria Addressed**: AC-10, AC-11
+- **Test Requirements**:
+  - `rule` TR-5.1: 上述命令退出码均为 0；`git diff --stat` 无未提交生成文件；CRD 总大小 < 900KB。
+  - `rule` TR-5.2: 文档描述与实现阶段语义一致（评审对照 FR-1~FR-13 抽查）。
+- **Notes**: typos 检查覆盖 docs 改动；不新增 E2E 测试。本机 `make gen VERSION=26.10.1` 中 helm-config 的 yq 二进制为非本机架构无法执行（仅 values.yaml galeraLibPath 修补，与本次改动无关）；CRD/helm crds/bundles/api_reference/examples 均已重新生成；无新增 RBAC。
+- **Completion Evidence**:
+  - TR-5.1（rule）：CRD 三处渲染产物均含 `status.configChange`；旧分散 hash 字段保留并标注 Deprecated；`docs/api_reference.md` 已重新生成。CRD 总量 793KB < 900KB（macOS 用 `stat -f%z` 核算）。
+  - TR-5.2（rule）：`docs/maxscale.md` 新增「Atomic configuration changes」章节，覆盖 7 阶段、失败保留旧图、代次栅栏、采用不追溯删除、外来端口 squatter 阻断与同端口最小切换窗口。
+  - TR-5.3（rule）：`make build`、`make lint`（0 issues）、`make test`（40 个 ginkgo 套件全过）均通过；dev.mk 的 `make test` 已加入 `./internal/controller/maxscaleconfigchange/...` 纯单测路径。

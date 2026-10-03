@@ -824,6 +824,129 @@ type MaxScaleTLSStatus struct {
 	ServerCert *CertificateStatus `json:"serverCert,omitempty"`
 }
 
+// MaxScaleConfigChangeStage is the stage of a generation-scoped MaxScale configuration change.
+type MaxScaleConfigChangeStage string
+
+const (
+	// ConfigChangeStageValidating validates references and graph closure before any REST mutation.
+	ConfigChangeStageValidating MaxScaleConfigChangeStage = "Validating"
+	// ConfigChangeStagePreparing creates and parameter-patches objects without disrupting the previous graph.
+	ConfigChangeStagePreparing MaxScaleConfigChangeStage = "Preparing"
+	// ConfigChangeStageSwitching switches the entry points and topology relationships.
+	ConfigChangeStageSwitching MaxScaleConfigChangeStage = "Switching"
+	// ConfigChangeStageCleaningUp deletes the objects owned by the previous graph that are no longer declared.
+	ConfigChangeStageCleaningUp MaxScaleConfigChangeStage = "CleaningUp"
+	// ConfigChangeStageCompleted means the desired graph has been committed and serves traffic on every replica.
+	ConfigChangeStageCompleted MaxScaleConfigChangeStage = "Completed"
+)
+
+// MaxScaleConfigObjectIDs holds MaxScale REST object IDs by kind.
+// It is used both as the committed graph snapshot and the ownership ledger.
+type MaxScaleConfigObjectIDs struct {
+	// Servers are the server object IDs.
+	// +optional
+	Servers []string `json:"servers,omitempty"`
+	// Filters are the filter object IDs.
+	// +optional
+	Filters []string `json:"filters,omitempty"`
+	// Monitor are the monitor object IDs. It is a set because a renamed monitor may transiently coexist with its previous one.
+	// +optional
+	Monitor []string `json:"monitor,omitempty"`
+	// Services are the service object IDs.
+	// +optional
+	Services []string `json:"services,omitempty"`
+	// Listeners are the listener object IDs.
+	// +optional
+	Listeners []string `json:"listeners,omitempty"`
+}
+
+// MaxScaleConfigChangeCheckpoints records the operations already completed by an in-flight change,
+// so retries and operator restarts resume idempotently without repeating destructive operations.
+type MaxScaleConfigChangeCheckpoints struct {
+	// Prepared holds the objects created or parameter-patched during the Preparing stage.
+	// +optional
+	Prepared *MaxScaleConfigObjectIDs `json:"prepared,omitempty"`
+	// MonitorCreated indicates whether the renamed (new) monitor has been created in stopped state.
+	// +optional
+	MonitorCreated bool `json:"monitorCreated,omitempty"`
+	// MonitorRelationsSwitched indicates that the same-name monitor server relationships have been switched.
+	// +optional
+	MonitorRelationsSwitched bool `json:"monitorRelationsSwitched,omitempty"`
+	// MonitorSwitchDone indicates that the monitor rename stop-old/start-new sequence completed on every Pod.
+	// +optional
+	MonitorSwitchDone bool `json:"monitorSwitchDone,omitempty"`
+	// SwitchedServices holds the existing services whose server/filter relationships have been switched.
+	// +optional
+	SwitchedServices []string `json:"switchedServices,omitempty"`
+	// SwitchedListeners holds the conflicting listeners whose stop-old/delete/create/start sequence completed.
+	// +optional
+	SwitchedListeners []string `json:"switchedListeners,omitempty"`
+	// Cleaned holds the old-generation objects deleted during the CleaningUp stage.
+	// +optional
+	Cleaned *MaxScaleConfigObjectIDs `json:"cleaned,omitempty"`
+}
+
+// MaxScaleConfigChangeError is the last error that blocked the configuration change.
+type MaxScaleConfigChangeError struct {
+	// Stage is the stage that failed.
+	// +optional
+	Stage MaxScaleConfigChangeStage `json:"stage,omitempty"`
+	// Kind is the REST object kind related to the error.
+	// +optional
+	Kind string `json:"kind,omitempty"`
+	// Object is the REST object ID related to the error.
+	// +optional
+	Object string `json:"object,omitempty"`
+	// Message is the error summary. It must never contain credentials.
+	// +optional
+	Message string `json:"message,omitempty"`
+	// Time is when the error happened.
+	// +optional
+	Time *metav1.Time `json:"time,omitempty"`
+}
+
+// MaxScaleConfigChangeStatus tracks a recoverable configuration change scoped to a single metadata.generation.
+// The change validates the desired dependency graph, prepares it alongside the previous one,
+// switches the entry points only after every replica converges, and finally cleans old objects.
+type MaxScaleConfigChangeStatus struct {
+	// Generation is the MaxScale metadata.generation targeted by this change.
+	Generation int64 `json:"generation"`
+	// Stage is the current stage of the change.
+	Stage MaxScaleConfigChangeStage `json:"stage"`
+	// DesiredHash is the fingerprint of the desired whole configuration graph.
+	// +optional
+	DesiredHash string `json:"desiredHash,omitempty"`
+	// LastApplied are the object IDs committed by the previous completed generation.
+	// Deletions are derived exclusively from this ledger, never from the live MaxScale index.
+	// +optional
+	LastApplied *MaxScaleConfigObjectIDs `json:"lastApplied,omitempty"`
+	// Managed is the ownership ledger: objects created or adopted by this MaxScale CR.
+	// +optional
+	Managed *MaxScaleConfigObjectIDs `json:"managed,omitempty"`
+	// Checkpoints make the change resumable across retries and operator restarts.
+	// +optional
+	Checkpoints *MaxScaleConfigChangeCheckpoints `json:"checkpoints,omitempty"`
+	// Error is the last error blocking the current stage, if any.
+	// +optional
+	Error *MaxScaleConfigChangeError `json:"error,omitempty"`
+}
+
+// InProgress indicates whether the change targets the given generation and has not been committed yet.
+func (c *MaxScaleConfigChangeStatus) InProgress(generation int64) bool {
+	if c == nil {
+		return false
+	}
+	return c.Generation == generation && c.Stage != ConfigChangeStageCompleted
+}
+
+// CompleteFor indicates whether the change for the given generation has been committed.
+func (c *MaxScaleConfigChangeStatus) CompleteFor(generation int64) bool {
+	if c == nil {
+		return false
+	}
+	return c.Generation == generation && c.Stage == ConfigChangeStageCompleted
+}
+
 // MaxScaleStatus defines the observed state of MaxScale
 type MaxScaleStatus struct {
 	// Conditions for the MaxScale object.
@@ -863,21 +986,29 @@ type MaxScaleStatus struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	TLS *MaxScaleTLSStatus `json:"tls,omitempty"`
 	// MonitorSpec is a hashed version of spec.monitor to be able to track changes during reconciliation.
+	// Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
 	// +optional
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	MonitorSpec string `json:"monitorSpec,omitempty"`
 	// FiltersSpec is a hashed version of spec.filters to be able to track changes during reconciliation.
+	// Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
 	// +optional
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	FiltersSpec string `json:"filtersSpec,omitempty"`
 	// ServersSpec is a hashed version of spec.servers to be able to track changes during reconciliation.
+	// Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
 	// +optional
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	ServersSpec string `json:"serversSpec,omitempty"`
 	// ServicesSpec is a hashed version of spec.services to be able to track changes during reconciliation.
+	// Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
 	// +optional
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	ServicesSpec string `json:"servicesSpec,omitempty"`
+	// ConfigChange tracks the recoverable configuration change currently applied to the MaxScale REST API.
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	ConfigChange *MaxScaleConfigChangeStatus `json:"configChange,omitempty"`
 }
 
 // SetCondition sets a status condition to MaxScale

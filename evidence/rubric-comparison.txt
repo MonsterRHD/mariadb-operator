@@ -1,0 +1,14 @@
+project-09｜MaxScale 配置图的跨副本原子切换
+题目 ID：mariadb-operator-mariadb-operator-1db9ad3c-bf7e-4447-952a-65610ca66ff0｜Harness：Trae｜有效轮数：239｜完成度：部分完成｜收录：长程题
+关键验证：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+
+Rubric ID：1｜状态：通过｜期望行为：同一 generation 的 servers、monitor、services 和 listeners 引用关系会在改动活动图前完成验证。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+Rubric ID：2｜状态：通过｜期望行为：新增或修改对象准备期间，上一版 listener 和 service 继续提供可用入口。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+Rubric ID：3｜状态：通过｜期望行为：只有所有 MaxScale 副本具备同一可用配置图后才切换入口，并在切换后清理旧代次对象。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+Rubric ID：4｜状态：未通过｜期望行为：任一对象或副本同步失败时保留上一版可服务图，并记录可继续的未完成阶段。｜实际观察：冲突 listener 切换先停止并删除旧入口，创建替代 listener 失败时没有回滚旧入口｜直接证据：internal/controller/maxscaleconfigchange/runner.go switchConflictingListener｜原因：冲突 listener 切换先停止并删除旧入口，创建替代 listener 失败时没有回滚旧入口｜影响：对象同步失败后上一版可服务入口已经消失｜证据位置：internal/controller/maxscaleconfigchange/runner.go switchConflictingListener
+Rubric ID：5｜状态：未通过｜期望行为：重试和 operator 重启不会重复删除对象，也不会把半成品配置图标记为 Ready。｜实际观察：listener 删除与创建完成前不保存切换检查点，进程退出后会从整段切换重新执行｜直接证据：internal/controller/maxscaleconfigchange/runner.go switch 阶段与 checkpoint 保存顺序｜原因：listener 删除与创建完成前不保存切换检查点，进程退出后会从整段切换重新执行｜影响：重启会重复删除旧 listener 且不能从已完成子阶段继续｜证据位置：internal/controller/maxscaleconfigchange/runner.go switch 阶段与 checkpoint 保存顺序
+Rubric ID：6｜状态：通过｜期望行为：连续 spec 更新会废弃陈旧 generation 计划，旧结果不会覆盖较新的对象关系。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+Rubric ID：7｜状态：通过｜期望行为：旧代次清理只删除当前 CR 声明且已被替代的对象，不会删除 MaxScale 中的无关对象。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+Rubric ID：8｜状态：通过｜期望行为：现有 suspend、switchover 和未改变配置的调谐行为保持原样。｜实际观察：依赖图验证、准备阶段、代次废弃、受管对象过滤与兼容分支由专项测试和代码验证｜直接证据：graph、converge、runner、client 专项用例通过且 go build ./... 通过；审计 maxscaleconfigchange/runner.go
+
+Prompt-Rubric 对齐：P1…Pn 与冻结 Rubric 逐项对应，无额外验收要求。

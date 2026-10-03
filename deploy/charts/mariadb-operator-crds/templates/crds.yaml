@@ -11732,6 +11732,206 @@ spec:
                   - type
                   type: object
                 type: array
+              configChange:
+                description: ConfigChange tracks the recoverable configuration change
+                  currently applied to the MaxScale REST API.
+                properties:
+                  checkpoints:
+                    description: Checkpoints make the change resumable across retries
+                      and operator restarts.
+                    properties:
+                      cleaned:
+                        description: Cleaned holds the old-generation objects deleted
+                          during the CleaningUp stage.
+                        properties:
+                          filters:
+                            description: Filters are the filter object IDs.
+                            items:
+                              type: string
+                            type: array
+                          listeners:
+                            description: Listeners are the listener object IDs.
+                            items:
+                              type: string
+                            type: array
+                          monitor:
+                            description: Monitor are the monitor object IDs. It is
+                              a set because a renamed monitor may transiently coexist
+                              with its previous one.
+                            items:
+                              type: string
+                            type: array
+                          servers:
+                            description: Servers are the server object IDs.
+                            items:
+                              type: string
+                            type: array
+                          services:
+                            description: Services are the service object IDs.
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      monitorCreated:
+                        description: MonitorCreated indicates whether the renamed
+                          (new) monitor has been created in stopped state.
+                        type: boolean
+                      monitorRelationsSwitched:
+                        description: MonitorRelationsSwitched indicates that the same-name
+                          monitor server relationships have been switched.
+                        type: boolean
+                      monitorSwitchDone:
+                        description: MonitorSwitchDone indicates that the monitor
+                          rename stop-old/start-new sequence completed on every Pod.
+                        type: boolean
+                      prepared:
+                        description: Prepared holds the objects created or parameter-patched
+                          during the Preparing stage.
+                        properties:
+                          filters:
+                            description: Filters are the filter object IDs.
+                            items:
+                              type: string
+                            type: array
+                          listeners:
+                            description: Listeners are the listener object IDs.
+                            items:
+                              type: string
+                            type: array
+                          monitor:
+                            description: Monitor are the monitor object IDs. It is
+                              a set because a renamed monitor may transiently coexist
+                              with its previous one.
+                            items:
+                              type: string
+                            type: array
+                          servers:
+                            description: Servers are the server object IDs.
+                            items:
+                              type: string
+                            type: array
+                          services:
+                            description: Services are the service object IDs.
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      switchedListeners:
+                        description: SwitchedListeners holds the conflicting listeners
+                          whose stop-old/delete/create/start sequence completed.
+                        items:
+                          type: string
+                        type: array
+                      switchedServices:
+                        description: SwitchedServices holds the existing services
+                          whose server/filter relationships have been switched.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  desiredHash:
+                    description: DesiredHash is the fingerprint of the desired whole
+                      configuration graph.
+                    type: string
+                  error:
+                    description: Error is the last error blocking the current stage,
+                      if any.
+                    properties:
+                      kind:
+                        description: Kind is the REST object kind related to the error.
+                        type: string
+                      message:
+                        description: Message is the error summary. It must never contain
+                          credentials.
+                        type: string
+                      object:
+                        description: Object is the REST object ID related to the error.
+                        type: string
+                      stage:
+                        description: Stage is the stage that failed.
+                        type: string
+                      time:
+                        description: Time is when the error happened.
+                        format: date-time
+                        type: string
+                    type: object
+                  generation:
+                    description: Generation is the MaxScale metadata.generation targeted
+                      by this change.
+                    format: int64
+                    type: integer
+                  lastApplied:
+                    description: |-
+                      LastApplied are the object IDs committed by the previous completed generation.
+                      Deletions are derived exclusively from this ledger, never from the live MaxScale index.
+                    properties:
+                      filters:
+                        description: Filters are the filter object IDs.
+                        items:
+                          type: string
+                        type: array
+                      listeners:
+                        description: Listeners are the listener object IDs.
+                        items:
+                          type: string
+                        type: array
+                      monitor:
+                        description: Monitor are the monitor object IDs. It is a set
+                          because a renamed monitor may transiently coexist with its
+                          previous one.
+                        items:
+                          type: string
+                        type: array
+                      servers:
+                        description: Servers are the server object IDs.
+                        items:
+                          type: string
+                        type: array
+                      services:
+                        description: Services are the service object IDs.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  managed:
+                    description: 'Managed is the ownership ledger: objects created
+                      or adopted by this MaxScale CR.'
+                    properties:
+                      filters:
+                        description: Filters are the filter object IDs.
+                        items:
+                          type: string
+                        type: array
+                      listeners:
+                        description: Listeners are the listener object IDs.
+                        items:
+                          type: string
+                        type: array
+                      monitor:
+                        description: Monitor are the monitor object IDs. It is a set
+                          because a renamed monitor may transiently coexist with its
+                          previous one.
+                        items:
+                          type: string
+                        type: array
+                      servers:
+                        description: Servers are the server object IDs.
+                        items:
+                          type: string
+                        type: array
+                      services:
+                        description: Services are the service object IDs.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  stage:
+                    description: Stage is the current stage of the change.
+                    type: string
+                required:
+                - generation
+                - stage
+                type: object
               configSync:
                 description: ConfigSync is the state of config sync.
                 properties:
@@ -11744,8 +11944,9 @@ spec:
                 - maxScaleVersion
                 type: object
               filtersSpec:
-                description: FiltersSpec is a hashed version of spec.filters to be
-                  able to track changes during reconciliation.
+                description: |-
+                  FiltersSpec is a hashed version of spec.filters to be able to track changes during reconciliation.
+                  Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
                 type: string
               listeners:
                 description: Listeners is the state of the listeners in the MaxScale
@@ -11775,8 +11976,9 @@ spec:
                 - state
                 type: object
               monitorSpec:
-                description: MonitorSpec is a hashed version of spec.monitor to be
-                  able to track changes during reconciliation.
+                description: |-
+                  MonitorSpec is a hashed version of spec.monitor to be able to track changes during reconciliation.
+                  Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
                 type: string
               primaryServer:
                 description: PrimaryServer is the primary server in the MaxScale API.
@@ -11801,8 +12003,9 @@ spec:
                   type: object
                 type: array
               serversSpec:
-                description: ServersSpec is a hashed version of spec.servers to be
-                  able to track changes during reconciliation.
+                description: |-
+                  ServersSpec is a hashed version of spec.servers to be able to track changes during reconciliation.
+                  Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
                 type: string
               services:
                 description: Services is the state of the services in the MaxScale
@@ -11821,8 +12024,9 @@ spec:
                   type: object
                 type: array
               servicesSpec:
-                description: ServicesSpec is a hashed version of spec.services to
-                  be able to track changes during reconciliation.
+                description: |-
+                  ServicesSpec is a hashed version of spec.services to be able to track changes during reconciliation.
+                  Deprecated: superseded by ConfigChange, which tracks the whole configuration graph as a recoverable, generation-scoped change.
                 type: string
               tls:
                 description: TLS aggregates the status of the certificates used by

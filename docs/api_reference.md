@@ -1651,6 +1651,51 @@ _Appears in:_
 | `sync` _[MaxScaleConfigSync](#maxscaleconfigsync)_ | Sync defines how to replicate configuration across MaxScale replicas. It is defaulted when HA is enabled. |  |  |
 
 
+
+
+
+
+#### MaxScaleConfigChangeStage
+
+_Underlying type:_ _string_
+
+MaxScaleConfigChangeStage is the stage of a generation-scoped MaxScale configuration change.
+
+
+
+_Appears in:_
+- [MaxScaleConfigChangeError](#maxscaleconfigchangeerror)
+
+| Field | Description |
+| --- | --- |
+| `Validating` | ConfigChangeStageValidating validates references and graph closure before any REST mutation.<br /> |
+| `Preparing` | ConfigChangeStagePreparing creates and parameter-patches objects without disrupting the previous graph.<br /> |
+| `Switching` | ConfigChangeStageSwitching switches the entry points and topology relationships.<br /> |
+| `CleaningUp` | ConfigChangeStageCleaningUp deletes the objects owned by the previous graph that are no longer declared.<br /> |
+| `Completed` | ConfigChangeStageCompleted means the desired graph has been committed and serves traffic on every replica.<br /> |
+
+
+#### MaxScaleConfigObjectIDs
+
+
+
+MaxScaleConfigObjectIDs holds MaxScale REST object IDs by kind.
+It is used both as the committed graph snapshot and the ownership ledger.
+
+
+
+_Appears in:_
+- [MaxScaleConfigChangeCheckpoints](#maxscaleconfigchangecheckpoints)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `servers` _string array_ | Servers are the server object IDs. |  |  |
+| `filters` _string array_ | Filters are the filter object IDs. |  |  |
+| `monitor` _string array_ | Monitor are the monitor object IDs. It is a set because a renamed monitor may transiently coexist with its previous one. |  |  |
+| `services` _string array_ | Services are the service object IDs. |  |  |
+| `listeners` _string array_ | Listeners are the listener object IDs. |  |  |
+
+
 #### MaxScaleConfigSync
 
 

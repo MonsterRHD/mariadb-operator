@@ -550,6 +550,49 @@ kubectl scale maxscale maxscale-galera --replicas 3
 ```
 Or even configuring an `HorizontalPodAutoscaler` to do the job automatically.
 
+## Atomic configuration changes
+
+The servers, monitor, services and listeners of a `MaxScale` form a dependency graph. A single
+`spec` update is applied as a recoverable, generation-scoped configuration transaction rather than
+as independent phase writes, so a failure, an unreachable replica, or an operator restart never
+leaves listeners pointing at a half-updated topology:
+
+1. **Validate** - static graph closure (unique names, ports, routers, monitor/service references
+   including `filters`) and dynamic references (monitor and server passwords, TLS CA) are resolved
+   before any REST call. An invalid update is rejected and the running configuration is untouched.
+2. **Prepare** - new servers, filters, services and parameter-only changes are created/patched on
+   the healthy replica. A renamed monitor is created in `Stopped` state; existing listeners,
+   services and monitors are neither deleted nor stopped. New services/listeners that do not carry
+   traffic yet may be provisioned, but a new listener whose port is still held by an old listener is
+   deferred.
+3. **Converge** - with more than one replica, every Pod must run the same
+   [config sync](#high-availability) version as the backend table and expose the prepared objects
+   before the change proceeds. Replicas lagging, or objects still missing, keep the change waiting.
+4. **Switch** - only after convergence do topology relationships (monitor/server sets,
+   service routers/filters) and entry points move. When a listener is renamed while keeping the
+   same port, the unavoidable cutover is the minimal window: the old listener is stopped on every
+   replica, deleted, and the new one is created and started.
+5. **Converge again** - every replica must expose the full new graph, including entry-point
+   relationships and running/stopped intent, before cleanup starts.
+6. **Cleanup** - objects removed by the new graph are deleted in dependency order
+   (`listeners -> services -> monitor -> filters -> servers`). Only objects the operator owns are
+   deleted: MaxScale objects that were never declared by this CR (for example created manually or
+   by another system) are never removed by the operator.
+7. **Commit** - the new graph and its fingerprint are recorded in `status.configChange`; the
+   `Ready` condition is withheld (`MaxScaleConfigChangeInProgress`, or
+   `MaxScaleConfigChangeFailed` with the failing stage and object) until every replica converges
+   and the generation commits. On restart the transaction resumes from per-stage checkpoints, so
+   destructive operations are not replayed; a `spec` update arriving while an older generation is
+   in flight supersedes the stale plan and folds anything it had already prepared into the
+   ownership ledger, so the newer plan never deletes based on stale decisions.
+
+On the first reconciliation after an upgrade, existing objects that are both declared by the
+current spec and present in MaxScale are adopted as the ownership ledger; objects not declared by
+the spec are not retroactively deleted. If a live listener outside the ledger occupies a port the
+declared listener needs, the change is blocked (ready condition and configuration event report the
+offending listener) rather than deleting an object this CR has never owned; remove or move the
+squatting listener to unblock the change.
+
 ## Suspend resources
 
 In order to enable this feature, you must set the `--feature-maxscale-suspend` feature flag:

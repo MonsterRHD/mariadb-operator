@@ -53,6 +53,19 @@ const (
 	// ReasonMaxScalePrimaryServerChanged indicates that the primary server managed by MaxScale has changed.
 	ReasonMaxScalePrimaryServerChanged = "MaxScalePrimaryServerChanged"
 
+	// ReasonMaxScaleConfigChangeInvalid indicates that the desired configuration graph failed validation and no REST change was applied.
+	ReasonMaxScaleConfigChangeInvalid = "MaxScaleConfigChangeInvalid"
+	// ReasonMaxScaleConfigChangePreparing indicates that new configuration objects are being prepared without disrupting the previous graph.
+	ReasonMaxScaleConfigChangePreparing = "MaxScaleConfigChangePreparing"
+	// ReasonMaxScaleConfigChangeSwitching indicates that entry points and topology relationships are being switched.
+	ReasonMaxScaleConfigChangeSwitching = "MaxScaleConfigChangeSwitching"
+	// ReasonMaxScaleConfigChangeCleaningUp indicates that old-generation managed objects are being deleted.
+	ReasonMaxScaleConfigChangeCleaningUp = "MaxScaleConfigChangeCleaningUp"
+	// ReasonMaxScaleConfigChangeCompleted indicates that a generation-scoped configuration change has been committed on every replica.
+	ReasonMaxScaleConfigChangeCompleted = "MaxScaleConfigChangeCompleted"
+	// ReasonMaxScaleConfigChangeFailed indicates that a generation-scoped configuration change is blocked by an error; the previous servable graph is retained.
+	ReasonMaxScaleConfigChangeFailed = "MaxScaleConfigChangeFailed"
+
 	// ReasonWebhookUpdateFailed indicates that the webhook configuration update failed.
 	ReasonWebhookUpdateFailed = "WebhookUpdateFailed"
 
