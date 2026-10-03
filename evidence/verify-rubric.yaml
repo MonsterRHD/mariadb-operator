@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: Connection 能区分显式值和引用对象派生值，默认计算不会覆盖显式 host、port、serviceName 或 Secret 格式。
+  - id: 2
+    type: f2p
+    text: 相关引用、带 watch 标记的 Secret 或模板变化后，独立及三类嵌入式 Connection 都会重新计算候选连接。
+  - id: 3
+    type: f2p
+    text: 父对象与凭据的一次变化只形成一个候选代次，连续变化和 operator 重启只继续最新代次并丢弃陈旧结果。
+  - id: 4
+    type: f2p
+    text: 启用 healthCheck 时，候选连接通过检查前仍保留上一版可用 Secret。
+  - id: 5
+    type: f2p
+    text: healthCheck 失败只更新可重试状态，不会发布失败候选或破坏上一版连接信息。
+  - id: 6
+    type: f2p
+    text: healthCheck 成功后，同一代次的 DSN 与拆分字段会一次性共同发布。
+  - id: 7
+    type: f2p
+    text: 删除父对象时生成的 Connection 和 Secret 仍按既有 owner 关系完成清理。
+  - id: 8
+    type: p2p
+    text: 引用未变化以及未启用 healthCheck 的现有 Connection 行为保持兼容。

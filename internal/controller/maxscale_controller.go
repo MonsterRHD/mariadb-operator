@@ -1635,16 +1635,10 @@ func (r *MaxScaleReconciler) reconcileConnection(ctx context.Context, req *reque
 	if req.mxs.Spec.Connection == nil {
 		return ctrl.Result{}, nil
 	}
-	key := req.mxs.ConnectionKey()
-	var existingConn mariadbv1alpha1.Connection
-	if err := r.Get(ctx, key, &existingConn); err == nil {
-		return ctrl.Result{}, nil
-	}
-
 	connOpts := builder.ConnectionOpts{
 		Metadata:             req.mxs.Spec.InheritMetadata,
 		MaxScale:             req.mxs,
-		Key:                  key,
+		Key:                  req.mxs.ConnectionKey(),
 		Username:             req.mxs.Spec.Auth.ClientUsername,
 		PasswordSecretKeyRef: &req.mxs.Spec.Auth.ClientPasswordSecretKeyRef.SecretKeySelector,
 		Template:             req.mxs.Spec.Connection,
@@ -1653,7 +1647,7 @@ func (r *MaxScaleReconciler) reconcileConnection(ctx context.Context, req *reque
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("error building Connection: %v", err)
 	}
-	return ctrl.Result{}, r.Create(ctx, conn)
+	return ctrl.Result{}, reconcileEmbeddedConnection(ctx, r.Client, conn)
 }
 
 func (r *MaxScaleReconciler) setupClients(ctx context.Context, req *requestMaxScale) (ctrl.Result, error) {

@@ -15,6 +15,7 @@
 - [External MariaDB connections](#external-mariadb-connections)
 - [Embedded Connection template](#embedded-connection-template)
 - [Health checking](#health-checking)
+- [Connection updates and rollout](#connection-updates-and-rollout)
 - [Reference](#reference)
 <!-- /toc -->
 
@@ -332,6 +333,8 @@ spec:
 
 When the `connection` template is specified, the operator automatically creates a `Connection` resource as part of the parent resource reconciliation. This is convenient when you need a single connection string for the initial user.
 
+The embedded template stays in sync with the parent resource: changes made to the template (e.g. on `MaxScale`, where it is mutable), to the initial user credentials or to the referenced port are propagated to the owned `Connection`. The parent keeps owning the child, so deleting the parent still deletes the `Connection` and its `Secret`.
+
 ## Health checking
 
 The `healthCheck` field configures periodic health checks to verify database connectivity:
@@ -359,6 +362,27 @@ spec:
 - `retryInterval`: How often to retry after a failed health check (default: 3s)
 
 The `Connection` status reflects the health check results, allowing you to monitor connectivity issues through Kubernetes.
+
+## Connection updates and rollout
+
+The operator distinguishes the values you set explicitly from the ones it derives from the referenced object:
+
+- `host`, `port` and `serviceName` defined in the spec are explicit and are never overwritten with defaults.
+- When they are omitted, the host and port are derived on every reconciliation from the referenced `MariaDB`, `MaxScale` or `ExternalMariaDB` (including the HA primary `Service`). They are no longer copied into the spec, so updating the referenced port or service entry updates the generated `Secret` automatically.
+
+A reconciliation is triggered when:
+
+- the referenced `MariaDB`, `MaxScale` or `ExternalMariaDB` spec changes (port, service entry, credentials, certificates or embedded templates);
+- a referenced `Secret` labeled with `k8s.mariadb.com/watch` changes (password or client certificate);
+- the `Connection` itself changes.
+
+Each change produces a new connection generation, identified by a fingerprint in `status.secretVersion`. When `healthCheck` is enabled, the operator verifies that a new candidate can actually connect **before** updating the `Secret`:
+
+- while the check fails, the previous `Secret` (and thus the DSN used by your applications) is kept untouched, and the `Connection` is marked not ready with a retryable condition;
+- once the check passes, the DSN and the individual `username`, `password`, `host`, `port` and `database` keys for the same generation are all published in a single update;
+- if the operator restarts or several changes happen in a row, only the latest candidate can be published and stale results are discarded.
+
+Without `healthCheck`, candidates are published immediately, matching the previous behavior.
 
 ## Reference
 - [API reference](./api_reference.md)

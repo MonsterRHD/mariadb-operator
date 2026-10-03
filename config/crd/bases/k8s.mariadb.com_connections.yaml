@@ -246,6 +246,13 @@ spec:
                   - type
                   type: object
                 type: array
+              secretVersion:
+                description: |-
+                  SecretVersion is the fingerprint of the connection data currently published to the Secret.
+                  It identifies the generation of the referenced object, credentials and templates that the Secret was built from.
+                  When a newer candidate is available, it is health-checked first and the Secret is only republished once it passes,
+                  keeping this field in sync with the data the Secret holds.
+                type: string
             type: object
         type: object
     served: true

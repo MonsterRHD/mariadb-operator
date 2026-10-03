@@ -4,15 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"strconv"
-	"strings"
-	"text/template"
+	"reflect"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
 	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
 	condition "github.com/mariadb-operator/mariadb-operator/v26/pkg/condition"
+	connectionpkg "github.com/mariadb-operator/mariadb-operator/v26/pkg/connection"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/controller/secret"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/health"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/interfaces"
@@ -22,13 +20,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-)
-
-var (
-	errConnHealthCheck = errors.New("error checking connection health")
 )
 
 // ConnectionReconciler reconciles a Connection object
@@ -44,6 +39,7 @@ type ConnectionReconciler struct {
 //+kubebuilder:rbac:groups=k8s.mariadb.com,resources=connections,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=k8s.mariadb.com,resources=connections/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=k8s.mariadb.com,resources=connections/finalizers,verbs=update
+//+kubebuilder:rbac:groups=k8s.mariadb.com,resources=mariadbs;maxscales;externalmariadbs,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=list;watch;create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -63,26 +59,50 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return result, err
 	}
 
-	if err := r.setDefaults(ctx, &conn, connRefs); err != nil {
+	if err := r.reconcileDefaults(ctx, &conn, connRefs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("error setting defaults: %v", err)
 	}
 
-	if result, err := r.checkHealth(ctx, &conn, connRefs); !result.IsZero() || err != nil {
+	if result, err := r.checkInfraHealth(ctx, &conn, connRefs); !result.IsZero() || err != nil {
 		return result, err
 	}
 
-	var secretErr *multierror.Error
-	err = r.reconcileSecret(ctx, &conn, connRefs)
-	if errors.Is(err, errConnHealthCheck) {
-		return r.retryResult(&conn)
+	// Build the candidate connection for the latest generation of the references and credentials.
+	sqlOpts, err := r.getSqlOpts(ctx, &conn, connRefs)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error getting SQL options: %v", err)
 	}
-	secretErr = multierror.Append(secretErr, err)
+	candidateData, err := connectionpkg.BuildSecretData(&conn, sqlOpts)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error building connection data: %v", err)
+	}
+	candidateVersion, err := connectionpkg.Version(candidateData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error computing connection version: %v", err)
+	}
 
-	patchErr := r.patchStatus(ctx, &conn, r.ConditionReady.PatcherHealthy(err))
-	secretErr = multierror.Append(secretErr, patchErr)
+	// The candidate must pass the health check before being published; while it fails, the Secret
+	// from the previous generation is kept untouched and only the retryable status is updated.
+	if conn.Spec.HealthCheck != nil {
+		if err := r.checkConnectivity(ctx, sqlOpts); err != nil {
+			log.FromContext(ctx).Info("Connection candidate failed health check, keeping previous Secret", "err", err)
+			if patchErr := r.patchStatus(ctx, &conn, r.ConditionReady.PatcherHealthy(err)); patchErr != nil {
+				return ctrl.Result{}, fmt.Errorf("error checking connection health: %v: %v", err, patchErr)
+			}
+			return r.retryResult(&conn)
+		}
+	}
 
-	if err := secretErr.ErrorOrNil(); err != nil {
-		return ctrl.Result{}, fmt.Errorf("error creating Secret: %v", err)
+	published := ptr.Deref(conn.Status.SecretVersion, "")
+	if published != candidateVersion || !r.secretExists(ctx, &conn) {
+		if err := r.publishSecret(ctx, &conn, connRefs, candidateData); err != nil {
+			return ctrl.Result{}, fmt.Errorf("error creating Secret: %v", err)
+		}
+	}
+
+	conn.Status.SecretVersion = ptr.To(candidateVersion)
+	if err := r.patchStatus(ctx, &conn, r.ConditionReady.PatcherHealthy(nil)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("error patching connection status: %v", err)
 	}
 	return r.healthResult(&conn)
 }
@@ -197,22 +217,38 @@ func (r *ConnectionReconciler) waitForRefs(ctx context.Context, conn *mariadbv1a
 	return ctrl.Result{}, nil
 }
 
-func (r *ConnectionReconciler) setDefaults(ctx context.Context, conn *mariadbv1alpha1.Connection,
+// reconcileDefaults migrates values persisted by older operator versions and applies the
+// parent-independent defaults. Explicit host, port and serviceName are never touched.
+func (r *ConnectionReconciler) reconcileDefaults(ctx context.Context, conn *mariadbv1alpha1.Connection,
 	refs *mariadbv1alpha1.ConnectionRefs) error {
-	return r.patch(ctx, conn, func(conn *mariadbv1alpha1.Connection) error {
-		return conn.SetDefaults(refs)
-	})
+	before := conn.DeepCopy()
+	if _, err := conn.MigrateDerivedFields(refs); err != nil {
+		return fmt.Errorf("error migrating derived fields: %v", err)
+	}
+	conn.SetDefaults()
+
+	if reflect.DeepEqual(before.Spec, conn.Spec) && reflect.DeepEqual(before.Annotations, conn.Annotations) {
+		return nil
+	}
+	if err := r.Patch(ctx, conn, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("error patching Connection: %v", err)
+	}
+	return nil
 }
 
-func (r *ConnectionReconciler) checkHealth(ctx context.Context, conn *mariadbv1alpha1.Connection,
+func (r *ConnectionReconciler) checkInfraHealth(ctx context.Context, conn *mariadbv1alpha1.Connection,
 	refs *mariadbv1alpha1.ConnectionRefs) (ctrl.Result, error) {
+	port, err := conn.EffectivePort(refs)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error getting effective port: %v", err)
+	}
 	if refs.MariaDB != nil {
 		healthy, err := health.IsStatefulSetHealthy(
 			ctx,
 			r.Client,
 			client.ObjectKeyFromObject(refs.MariaDB),
 			health.WithDesiredReplicas(refs.MariaDB.Spec.Replicas),
-			health.WithPort(conn.Spec.Port),
+			health.WithPort(port),
 			health.WithEndpointPolicy(health.EndpointPolicyAtLeastOne),
 		)
 		if err != nil {
@@ -231,7 +267,7 @@ func (r *ConnectionReconciler) checkHealth(ctx context.Context, conn *mariadbv1a
 			r.Client,
 			client.ObjectKeyFromObject(refs.MaxScale),
 			health.WithDesiredReplicas(refs.MaxScale.Spec.Replicas),
-			health.WithPort(conn.Spec.Port),
+			health.WithPort(port),
 			health.WithEndpointPolicy(health.EndpointPolicyAtLeastOne),
 		)
 		if err != nil {
@@ -247,64 +283,22 @@ func (r *ConnectionReconciler) checkHealth(ctx context.Context, conn *mariadbv1a
 	return ctrl.Result{}, nil
 }
 
-func (r *ConnectionReconciler) reconcileSecret(ctx context.Context, conn *mariadbv1alpha1.Connection,
-	refs *mariadbv1alpha1.ConnectionRefs) error {
-	sqlOpts, err := r.getSqlOpts(ctx, conn, refs)
-	if err != nil {
-		return fmt.Errorf("error getting SQL options: %v", err)
+func (r *ConnectionReconciler) secretExists(ctx context.Context, conn *mariadbv1alpha1.Connection) bool {
+	var secret corev1.Secret
+	key := types.NamespacedName{
+		Name:      conn.SecretName(),
+		Namespace: conn.Namespace,
 	}
-	dsn, err := clientsql.BuildDSN(sqlOpts)
-	if err != nil {
-		return fmt.Errorf("error building DSN: %v", err)
+	if err := r.Get(ctx, key, &secret); err != nil {
+		return false
 	}
+	return true
+}
 
-	data := map[string][]byte{
-		conn.SecretKey(): []byte(dsn),
-	}
-	if formatString := conn.Spec.SecretTemplate.Format; formatString != nil {
-		tmpl := template.Must(template.New("").Parse(*formatString))
-		builder := &strings.Builder{}
-
-		err := tmpl.Execute(builder, map[string]string{
-			"Username": sqlOpts.Username,
-			"Password": sqlOpts.Password,
-			"Host":     sqlOpts.Host,
-			"Port":     strconv.Itoa(int(sqlOpts.Port)),
-			"Database": sqlOpts.Database,
-			"Params": func() string {
-				v := url.Values{}
-				for key, value := range sqlOpts.Params {
-					v.Add(key, value)
-				}
-
-				s := v.Encode()
-				if s == "" {
-					return s
-				}
-				return fmt.Sprintf("?%s", s)
-			}(),
-		})
-		if err != nil {
-			return fmt.Errorf("error parsing DSN template: %v", err)
-		}
-		data[conn.SecretKey()] = []byte(builder.String())
-	}
-	if usernameKey := conn.Spec.SecretTemplate.UsernameKey; usernameKey != nil {
-		data[*usernameKey] = []byte(sqlOpts.Username)
-	}
-	if passwordKey := conn.Spec.SecretTemplate.PasswordKey; passwordKey != nil {
-		data[*passwordKey] = []byte(sqlOpts.Password)
-	}
-	if hostKey := conn.Spec.SecretTemplate.HostKey; hostKey != nil {
-		data[*hostKey] = []byte(sqlOpts.Host)
-	}
-	if portKey := conn.Spec.SecretTemplate.PortKey; portKey != nil {
-		data[*portKey] = []byte(strconv.Itoa(int(sqlOpts.Port)))
-	}
-	if databaseKey := conn.Spec.SecretTemplate.DatabaseKey; databaseKey != nil && sqlOpts.Database != "" {
-		data[*databaseKey] = []byte(sqlOpts.Database)
-	}
-
+// publishSecret writes the whole candidate generation (DSN and split fields) in a single Secret
+// create or patch.
+func (r *ConnectionReconciler) publishSecret(ctx context.Context, conn *mariadbv1alpha1.Connection,
+	refs *mariadbv1alpha1.ConnectionRefs, data map[string][]byte) error {
 	var meta []*mariadbv1alpha1.Metadata
 	if refs.MariaDB != nil && refs.MariaDB.Spec.InheritMetadata != nil {
 		meta = append(meta, refs.MariaDB.Spec.InheritMetadata)
@@ -325,20 +319,23 @@ func (r *ConnectionReconciler) reconcileSecret(ctx context.Context, conn *mariad
 	if err := r.SecretReconciler.Reconcile(ctx, &req); err != nil {
 		return fmt.Errorf("error reconciling Secret: %v", err)
 	}
-
-	if err := r.healthCheck(ctx, conn, sqlOpts); err != nil {
-		log.FromContext(ctx).Info("Error checking connection health", "err", err)
-		return errConnHealthCheck
-	}
 	return nil
 }
 
 func (r *ConnectionReconciler) getSqlOpts(ctx context.Context, conn *mariadbv1alpha1.Connection,
 	refs *mariadbv1alpha1.ConnectionRefs) (clientsql.Opts, error) {
+	host, err := conn.EffectiveHost(refs)
+	if err != nil {
+		return clientsql.Opts{}, fmt.Errorf("error getting effective host: %v", err)
+	}
+	port, err := conn.EffectivePort(refs)
+	if err != nil {
+		return clientsql.Opts{}, fmt.Errorf("error getting effective port: %v", err)
+	}
 	sqlOpts := clientsql.Opts{
 		Username: conn.Spec.Username,
-		Host:     conn.Spec.Host,
-		Port:     conn.Spec.Port,
+		Host:     host,
+		Port:     port,
 		Params:   conn.Spec.Params,
 	}
 	if conn.Spec.PasswordSecretKeyRef != nil {
@@ -442,28 +439,14 @@ func (r *ConnectionReconciler) clientCertSecretKey(conn *mariadbv1alpha1.Connect
 	return nil
 }
 
-func (r *ConnectionReconciler) healthCheck(ctx context.Context, conn *mariadbv1alpha1.Connection, clientOpts clientsql.Opts) error {
-	if conn.Spec.HealthCheck == nil {
-		return nil
-	}
+// checkConnectivity verifies the candidate can actually open a database connection.
+func (r *ConnectionReconciler) checkConnectivity(ctx context.Context, clientOpts clientsql.Opts) error {
 	log.FromContext(ctx).V(1).Info("Checking connection health")
 	db, err := clientsql.ConnectWithOpts(clientOpts)
 	if err != nil {
-		var connErr *multierror.Error
-		connErr = multierror.Append(connErr, err)
-
-		patchErr := r.patchStatus(
-			ctx,
-			conn,
-			r.ConditionReady.PatcherHealthy(fmt.Errorf("failed to connect: %v", err)),
-		)
-		return multierror.Append(connErr, patchErr)
+		return fmt.Errorf("failed to connect: %v", err)
 	}
 	defer db.Close()
-
-	if err := r.patchStatus(ctx, conn, r.ConditionReady.PatcherHealthy(nil)); err != nil {
-		return fmt.Errorf("error patching connection status: %v", err)
-	}
 	return nil
 }
 
@@ -488,18 +471,6 @@ func (r *ConnectionReconciler) patchStatus(ctx context.Context, conn *mariadbv1a
 
 	if err := r.Client.Status().Patch(ctx, conn, patch); err != nil {
 		return fmt.Errorf("error patching connection status: %v", err)
-	}
-	return nil
-}
-
-func (r *ConnectionReconciler) patch(ctx context.Context, conn *mariadbv1alpha1.Connection,
-	patcher func(*mariadbv1alpha1.Connection) error) error {
-	patch := client.MergeFrom(conn.DeepCopy())
-	if err := patcher(conn); err != nil {
-		return err
-	}
-	if err := r.Patch(ctx, conn, patch); err != nil {
-		return fmt.Errorf("error patching connection: %v", err)
 	}
 	return nil
 }

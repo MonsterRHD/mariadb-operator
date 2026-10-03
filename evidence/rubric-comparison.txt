@@ -1,0 +1,14 @@
+project-08｜Connection Secret 代次化重算与健康发布
+题目 ID：mariadb-operator-mariadb-operator-c1ff5216-9d7a-44fe-a818-0bb57158eb1a｜Harness：Trae｜有效轮数：119｜完成度：部分完成｜收录：长程题
+关键验证：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+
+Rubric ID：1｜状态：通过｜期望行为：Connection 能区分显式值和引用对象派生值，默认计算不会覆盖显式 host、port、serviceName 或 Secret 格式。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：2｜状态：通过｜期望行为：相关引用、带 watch 标记的 Secret 或模板变化后，独立及三类嵌入式 Connection 都会重新计算候选连接。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：3｜状态：未通过｜期望行为：父对象与凭据的一次变化只形成一个候选代次，连续变化和 operator 重启只继续最新代次并丢弃陈旧结果。｜实际观察：健康检查完成后发布 Secret 前未重新读取 Connection 与引用对象的 generation 或资源版本｜直接证据：internal/controller/connection_controller.go 候选构建、healthCheck、publishSecret 顺序｜原因：健康检查完成后发布 Secret 前未重新读取 Connection 与引用对象的 generation 或资源版本｜影响：检查期间发生连续变更时旧候选仍会先发布并覆盖较新代次｜证据位置：internal/controller/connection_controller.go 候选构建、healthCheck、publishSecret 顺序
+Rubric ID：4｜状态：通过｜期望行为：启用 healthCheck 时，候选连接通过检查前仍保留上一版可用 Secret。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：5｜状态：通过｜期望行为：healthCheck 失败只更新可重试状态，不会发布失败候选或破坏上一版连接信息。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：6｜状态：通过｜期望行为：healthCheck 成功后，同一代次的 DSN 与拆分字段会一次性共同发布。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：7｜状态：通过｜期望行为：删除父对象时生成的 Connection 和 Secret 仍按既有 owner 关系完成清理。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+Rubric ID：8｜状态：通过｜期望行为：引用未变化以及未启用 healthCheck 的现有 Connection 行为保持兼容。｜实际观察：显式字段、引用 watch、健康检查保留、原子 Secret 与 owner 清理由专项测试和代码验证｜直接证据：pkg/connection 与控制器专项用例通过且 go build ./... 通过；envtest 因本机缺少 etcd 未执行；审计 publishSecret 调用链
+
+Prompt-Rubric 对齐：P1…Pn 与冻结 Rubric 逐项对应，无额外验收要求。

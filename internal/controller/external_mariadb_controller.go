@@ -127,16 +127,10 @@ func (r *ExternalMariaDBReconciler) reconcileConnection(ctx context.Context,
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
-	key := client.ObjectKeyFromObject(extMariaDB)
-	var existingConn mariadbv1alpha1.Connection
-	if err := r.Get(ctx, key, &existingConn); err == nil {
-		return ctrl.Result{}, nil
-	}
-
 	connOpts := builder.ConnectionOpts{
 		Metadata:             extMariaDB.Spec.InheritMetadata,
 		ExternalMariaDB:      extMariaDB,
-		Key:                  key,
+		Key:                  client.ObjectKeyFromObject(extMariaDB),
 		Username:             *extMariaDB.Spec.Username,
 		PasswordSecretKeyRef: extMariaDB.Spec.PasswordSecretKeyRef,
 		Template:             extMariaDB.Spec.Connection,
@@ -145,8 +139,7 @@ func (r *ExternalMariaDBReconciler) reconcileConnection(ctx context.Context,
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("error building Connection: %v", err)
 	}
-	return ctrl.Result{}, r.Create(ctx, conn)
-
+	return ctrl.Result{}, reconcileEmbeddedConnection(ctx, r.Client, conn)
 }
 
 func (r *ExternalMariaDBReconciler) reconcileStatus(ctx context.Context,

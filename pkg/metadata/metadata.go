@@ -27,5 +27,9 @@ var (
 
 	WebhookConfigAnnotation = "k8s.mariadb.com/webhook"
 
+	// ConnectionDerivedFieldsAnnotation marks a Connection whose legacy controller-populated
+	// host and port have been migrated to reference-derived values.
+	ConnectionDerivedFieldsAnnotation = "k8s.mariadb.com/connection-derived-fields"
+
 	MetaCtrlFieldPath = ".metadata.controller"
 )

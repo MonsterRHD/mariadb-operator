@@ -1107,11 +1107,6 @@ func (r *MariaDBReconciler) reconcileConnection(ctx context.Context, mariadb *ma
 
 func (r *MariaDBReconciler) reconcileConnectionTemplate(ctx context.Context, key types.NamespacedName,
 	connTpl *mariadbv1alpha1.ConnectionTemplate, mariadb *mariadbv1alpha1.MariaDB) error {
-	var existingConn mariadbv1alpha1.Connection
-	if err := r.Get(ctx, key, &existingConn); err == nil {
-		return nil
-	}
-
 	if mariadb.Spec.Username == nil || mariadb.Spec.PasswordSecretKeyRef == nil {
 		log.FromContext(ctx).Error(
 			errors.New("unable to reconcile Connection"),
@@ -1134,7 +1129,7 @@ func (r *MariaDBReconciler) reconcileConnectionTemplate(ctx context.Context, key
 	if err != nil {
 		return fmt.Errorf("error building Connection: %v", err)
 	}
-	return r.Create(ctx, conn)
+	return reconcileEmbeddedConnection(ctx, r.Client, conn)
 }
 
 func (r *MariaDBReconciler) reconcileDefaultConnection(ctx context.Context, mariadb *mariadbv1alpha1.MariaDB) error {
@@ -1142,11 +1137,6 @@ func (r *MariaDBReconciler) reconcileDefaultConnection(ctx context.Context, mari
 		return nil
 	}
 	key := client.ObjectKeyFromObject(mariadb)
-	var existingConn mariadbv1alpha1.Connection
-	if err := r.Get(ctx, key, &existingConn); err == nil {
-		return nil
-	}
-
 	if mariadb.Spec.Username == nil || mariadb.Spec.PasswordSecretKeyRef == nil {
 		log.FromContext(ctx).Error(
 			errors.New("unable to reconcile default Connection"),
@@ -1169,7 +1159,7 @@ func (r *MariaDBReconciler) reconcileDefaultConnection(ctx context.Context, mari
 	if err != nil {
 		return fmt.Errorf("error building Connection: %v", err)
 	}
-	return r.Create(ctx, conn)
+	return reconcileEmbeddedConnection(ctx, r.Client, conn)
 }
 
 func (r *MariaDBReconciler) patchStatus(ctx context.Context, mariadb *mariadbv1alpha1.MariaDB,

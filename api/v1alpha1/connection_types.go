@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"errors"
 
+	"github.com/mariadb-operator/mariadb-operator/v26/pkg/metadata"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/statefulset"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -124,6 +125,13 @@ type ConnectionStatus struct {
 	// +optional
 	// +operator-sdk:csv:customresourcedefinitions:type=status,xDescriptors={"urn:alm:descriptor:io.kubernetes.conditions"}
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// SecretVersion is the fingerprint of the connection data currently published to the Secret.
+	// It identifies the generation of the referenced object, credentials and templates that the Secret was built from.
+	// When a newer candidate is available, it is health-checked first and the Secret is only republished once it passes,
+	// keeping this field in sync with the data the Secret holds.
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	SecretVersion *string `json:"secretVersion,omitempty"`
 }
 
 func (c *ConnectionStatus) SetCondition(condition metav1.Condition) {
@@ -155,21 +163,11 @@ func (c *Connection) IsReady() bool {
 	return meta.IsStatusConditionTrue(c.Status.Conditions, ConditionTypeReady)
 }
 
-func (c *Connection) SetDefaults(refs *ConnectionRefs) error {
-	if c.Spec.Host == "" {
-		host, err := refs.Host(c)
-		if err != nil {
-			return err
-		}
-		c.Spec.Host = *host
-	}
-	if c.Spec.Port == 0 {
-		port, err := refs.Port()
-		if err != nil {
-			return err
-		}
-		c.Spec.Port = *port
-	}
+// SetDefaults defaults the fields that do not depend on the referenced object: the Secret name
+// and the Secret template key. Host and port are intentionally not persisted, they are recomputed
+// from the references on every reconciliation (see EffectiveHost and EffectivePort), so changes
+// in the referenced MariaDB, MaxScale or ExternalMariaDB are always reflected.
+func (c *Connection) SetDefaults() {
 	if c.Spec.SecretName == nil {
 		c.Spec.SecretName = &c.Name
 	}
@@ -177,8 +175,107 @@ func (c *Connection) SetDefaults(refs *ConnectionRefs) error {
 		c.Spec.SecretTemplate = &SecretTemplate{
 			Key: &defaultConnSecretKey,
 		}
+	} else if c.Spec.SecretTemplate.Key == nil {
+		c.Spec.SecretTemplate.Key = &defaultConnSecretKey
 	}
-	return nil
+}
+
+// EffectiveHost returns the host the Connection must use: the explicitly configured host when
+// present, or the host derived from the referenced object. Explicit values are never replaced
+// by defaults.
+func (c *Connection) EffectiveHost(refs *ConnectionRefs) (string, error) {
+	if c.Spec.Host != "" {
+		return c.Spec.Host, nil
+	}
+	host, err := refs.Host(c)
+	if err != nil {
+		return "", err
+	}
+	return *host, nil
+}
+
+// EffectivePort returns the port the Connection must use: the explicitly configured port when
+// present, or the port derived from the referenced object.
+func (c *Connection) EffectivePort(refs *ConnectionRefs) (int32, error) {
+	if c.Spec.Port != 0 {
+		return c.Spec.Port, nil
+	}
+	port, err := refs.Port()
+	if err != nil {
+		return 0, err
+	}
+	return *port, nil
+}
+
+// MigrateDerivedFields moves host and port values persisted into the spec by older operator
+// versions into reference-derived values. It only clears values that match the endpoints the
+// operator would derive itself (operator-owned Service FQDNs and the referenced port), keeping
+// explicitly configured values untouched. The migration runs once, tracked by an annotation.
+// It returns whether the Connection was modified.
+func (c *Connection) MigrateDerivedFields(refs *ConnectionRefs) (bool, error) {
+	if c.Annotations != nil {
+		if _, ok := c.Annotations[metadata.ConnectionDerivedFieldsAnnotation]; ok {
+			return false, nil
+		}
+	}
+	defer func() {
+		if c.Annotations == nil {
+			c.Annotations = map[string]string{}
+		}
+		c.Annotations[metadata.ConnectionDerivedFieldsAnnotation] = "true"
+	}()
+
+	derivedHosts, err := c.derivedHosts(refs)
+	if err != nil {
+		return false, err
+	}
+	if c.Spec.Host != "" {
+		for _, host := range derivedHosts {
+			if c.Spec.Host == host {
+				c.Spec.Host = ""
+				break
+			}
+		}
+	}
+	if c.Spec.Port != 0 {
+		port, err := refs.Port()
+		if err != nil {
+			return false, err
+		}
+		if c.Spec.Port == *port {
+			c.Spec.Port = 0
+		}
+	}
+	return true, nil
+}
+
+// derivedHosts returns the Service FQDNs the operator derives a host from, including the naming
+// variants older versions may have persisted into the spec.
+func (c *Connection) derivedHosts(refs *ConnectionRefs) ([]string, error) {
+	hosts := []string{}
+	objMeta, err := refs.objectMeta()
+	if err != nil {
+		return nil, err
+	}
+	// Service named after the referenced object.
+	hosts = append(hosts, statefulset.ServiceFQDN(*objMeta))
+	// Current derivation: explicit serviceName or the HA primary Service.
+	if host, err := refs.Host(c); err == nil && host != nil {
+		hosts = append(hosts, *host)
+	}
+	if refs.MariaDB != nil {
+		hosts = append(hosts,
+			statefulset.ServiceFQDN(metav1.ObjectMeta{
+				Name:      refs.MariaDB.PrimaryServiceKey().Name,
+				Namespace: objMeta.Namespace,
+			}),
+			statefulset.ServiceFQDN(metav1.ObjectMeta{
+				Name:      refs.MariaDB.SecondaryServiceKey().Name,
+				Namespace: objMeta.Namespace,
+			}),
+		)
+	}
+	return hosts, nil
 }
 
 func (c *Connection) SecretName() string {
