@@ -183,6 +183,7 @@ func (b *Builder) BuildPhysicalBackupJob(key types.NamespacedName, backup *maria
 			batchBackupDirFullPath,
 		),
 		command.WithBackupContentType(mariadbv1alpha1.BackupContentTypePhysical),
+		command.WithPhysicalBackupKey(client.ObjectKeyFromObject(backup)),
 		command.WithPhysicalBackupMeta(
 			mariadb.IsPointInTimeRecoveryEnabled(),
 			client.ObjectKeyFromObject(backup),

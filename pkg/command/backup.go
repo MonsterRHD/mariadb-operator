@@ -85,6 +85,16 @@ func WithPhysicalBackupMeta(enabled bool, physicalBackupKey types.NamespacedName
 	}
 }
 
+// WithPhysicalBackupKey configures the PhysicalBackup tracked by backup Jobs.
+// Unlike WithPhysicalBackupMeta, it does not enable GTID metadata patching: the
+// key is also required by backup Jobs to protect backups being restored and to
+// report retention cleanup status.
+func WithPhysicalBackupKey(physicalBackupKey types.NamespacedName) BackupOpt {
+	return func(bo *BackupOpts) {
+		bo.PhysicalBackupKey = &physicalBackupKey
+	}
+}
+
 func WithOmitCredentials(omit bool) BackupOpt {
 	return func(bo *BackupOpts) {
 		bo.OmitCredentials = omit
@@ -873,9 +883,11 @@ func (b *BackupCommand) physicalBackupArgs() []string {
 			b.BackupFullDirPath,
 		}...)
 	}
-	if b.PhysicalBackupMeta && b.PhysicalBackupKey != nil {
+	if b.PhysicalBackupKey != nil {
+		if b.PhysicalBackupMeta {
+			args = append(args, "--physical-backup-meta")
+		}
 		args = append(args, []string{
-			"--physical-backup-meta",
 			"--physical-backup-name",
 			b.PhysicalBackupKey.Name,
 			"--physical-backup-namespace",

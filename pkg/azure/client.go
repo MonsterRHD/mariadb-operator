@@ -18,6 +18,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
+	"github.com/mariadb-operator/mariadb-operator/v26/pkg/refresolver"
 	"k8s.io/utils/ptr"
 )
 
@@ -94,6 +96,42 @@ type AzBlobClient struct {
 
 	// Local FS Opts
 	BasePath string
+}
+
+// NewAzBlobClientFromConfig builds an AzBlobClient from an AzureBlob API reference,
+// resolving credentials and TLS material through the provided reference resolver.
+func NewAzBlobClientFromConfig(
+	ctx context.Context,
+	refResolver refresolver.RefResolver,
+	abs mariadbv1alpha1.AzureBlob,
+	basePath,
+	namespace string,
+	opts ...AzBlobOpt,
+) (*AzBlobClient, error) {
+	clientOpts := []AzBlobOpt{
+		WithPrefix(abs.Prefix),
+		WithAccountName(abs.StorageAccountName),
+	}
+	clientOpts = append(clientOpts, opts...)
+
+	// If the storage account key is not set, DefaultAzureCredential is used.
+	if abs.StorageAccountKey != nil {
+		accountKey, err := refResolver.SecretKeyRef(ctx, *abs.StorageAccountKey, namespace)
+		if err != nil {
+			return nil, fmt.Errorf("error getting Azure Blob storage account key: %w", err)
+		}
+		clientOpts = append(clientOpts, WithAccountKey(accountKey))
+	}
+
+	if tls := ptr.Deref(abs.TLS, mariadbv1alpha1.TLSConfig{}); tls.Enabled && tls.CASecretKeyRef != nil {
+		caCertBytes, err := refResolver.SecretKeyRef(ctx, *tls.CASecretKeyRef, namespace)
+		if err != nil {
+			return nil, fmt.Errorf("error getting Azure Blob CA cert: %w", err)
+		}
+		clientOpts = append(clientOpts, WithTLSEnabled(true), WithTLSCACertBytes([]byte(caCertBytes)))
+	}
+
+	return NewAzBlobClient(basePath, abs.ContainerName, abs.ServiceURL, clientOpts...)
 }
 
 // NewAzBlobClient creates a Azure Blob Storage Client for a single container.

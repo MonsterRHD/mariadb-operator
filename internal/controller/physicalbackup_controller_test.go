@@ -6,10 +6,15 @@ import (
 
 	"github.com/go-logr/logr"
 	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
+	"github.com/mariadb-operator/mariadb-operator/v26/pkg/refresolver"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 var _ = Describe("PhysicalBackup", Label("basic"), func() {
@@ -162,6 +167,215 @@ var _ = Describe("PhysicalBackup", Label("basic"), func() {
 				decoratePhysicalBackupWithSchedule,
 			),
 			testPhysicalBackup,
+		),
+	)
+})
+
+var _ = Describe("PhysicalBackup retention protection", Label("basic"), func() {
+	const (
+		testPBName      = "physicalbackup-retention"
+		testPITRName    = "pitr-retention"
+		testNamespace   = "test-retention"
+		testSnapshot    = testPBName + "-20230101000000"
+		testInitialized = "mdb-initialized"
+		testRestoring   = "mdb-restoring"
+	)
+
+	newReconciler := func(objects ...client.Object) *PhysicalBackupReconciler {
+		scheme := runtime.NewScheme()
+		Expect(mariadbv1alpha1.AddToScheme(scheme)).To(Succeed())
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			Build()
+		return &PhysicalBackupReconciler{
+			Client:      fakeClient,
+			RefResolver: refresolver.New(fakeClient),
+		}
+	}
+
+	newPhysicalBackup := func(storage mariadbv1alpha1.PhysicalBackupStorage) *mariadbv1alpha1.PhysicalBackup {
+		return &mariadbv1alpha1.PhysicalBackup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      testPBName,
+				Namespace: testNamespace,
+			},
+			Spec: mariadbv1alpha1.PhysicalBackupSpec{
+				Storage: storage,
+			},
+		}
+	}
+
+	newMariaDB := func(name string, bootstrap *mariadbv1alpha1.BootstrapFrom, initialized bool) *mariadbv1alpha1.MariaDB {
+		mdb := &mariadbv1alpha1.MariaDB{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: testNamespace,
+			},
+			Spec: mariadbv1alpha1.MariaDBSpec{
+				BootstrapFrom: bootstrap,
+			},
+		}
+		if initialized {
+			mdb.Status.Conditions = []metav1.Condition{
+				{
+					Type:   mariadbv1alpha1.ConditionTypeInitialized,
+					Status: metav1.ConditionTrue,
+				},
+			}
+		}
+		return mdb
+	}
+
+	s3Storage := mariadbv1alpha1.PhysicalBackupStorage{
+		S3: &mariadbv1alpha1.S3{
+			Bucket:   "backups",
+			Endpoint: "s3.example.com",
+			Prefix:   "mariadb",
+		},
+	}
+	snapshotStorage := mariadbv1alpha1.PhysicalBackupStorage{
+		VolumeSnapshot: &mariadbv1alpha1.PhysicalBackupVolumeSnapshot{
+			VolumeSnapshotClassName: "csi",
+		},
+	}
+
+	DescribeTable("computing restore protection",
+		func(
+			pb *mariadbv1alpha1.PhysicalBackup,
+			objects []client.Object,
+			wantBlocked bool,
+			wantSnapshot string,
+		) {
+			reconciler := newReconciler(objects...)
+			protection, err := reconciler.getRestoreProtection(context.Background(), pb)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(protection.blocked).To(Equal(wantBlocked))
+			if wantSnapshot != "" {
+				Expect(protection.snapshotNames).To(HaveKey(wantSnapshot))
+			} else {
+				Expect(protection.snapshotNames).To(BeEmpty())
+			}
+		},
+		Entry("no MariaDBs restores anything",
+			newPhysicalBackup(s3Storage),
+			nil,
+			false,
+			"",
+		),
+		Entry("initialized MariaDB does not block retention",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testInitialized, &mariadbv1alpha1.BootstrapFrom{
+					BackupRef: &mariadbv1alpha1.TypedLocalObjectReference{
+						Name: testPBName,
+						Kind: mariadbv1alpha1.PhysicalBackupKind,
+					},
+				}, true),
+			},
+			false,
+			"",
+		),
+		Entry("direct PhysicalBackup reference blocks retention",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					BackupRef: &mariadbv1alpha1.TypedLocalObjectReference{
+						Name: testPBName,
+						Kind: mariadbv1alpha1.PhysicalBackupKind,
+					},
+				}, false),
+			},
+			true,
+			"",
+		),
+		Entry("reference to a different PhysicalBackup does not block",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					BackupRef: &mariadbv1alpha1.TypedLocalObjectReference{
+						Name: "another-physicalbackup",
+						Kind: mariadbv1alpha1.PhysicalBackupKind,
+					},
+				}, false),
+			},
+			false,
+			"",
+		),
+		Entry("point-in-time recovery reference blocks retention",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					PointInTimeRecoveryRef: &mariadbv1alpha1.LocalObjectReference{
+						Name: testPITRName,
+					},
+				}, false),
+				&mariadbv1alpha1.PointInTimeRecovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      testPITRName,
+						Namespace: testNamespace,
+					},
+					Spec: mariadbv1alpha1.PointInTimeRecoverySpec{
+						PhysicalBackupRef: mariadbv1alpha1.LocalObjectReference{
+							Name: testPBName,
+						},
+					},
+				},
+			},
+			true,
+			"",
+		),
+		Entry("restore from the same S3 storage blocks retention",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					S3: &mariadbv1alpha1.S3{
+						Bucket:   "backups",
+						Endpoint: "s3.example.com",
+						Prefix:   "mariadb",
+					},
+				}, false),
+			},
+			true,
+			"",
+		),
+		Entry("restore from a different S3 bucket does not block",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					S3: &mariadbv1alpha1.S3{
+						Bucket:   "other-backups",
+						Endpoint: "s3.example.com",
+						Prefix:   "mariadb",
+					},
+				}, false),
+			},
+			false,
+			"",
+		),
+		Entry("VolumeSnapshot reference blocks snapshot retention and protects the snapshot",
+			newPhysicalBackup(snapshotStorage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					VolumeSnapshotRef: &mariadbv1alpha1.LocalObjectReference{
+						Name: testSnapshot,
+					},
+				}, false),
+			},
+			true,
+			testSnapshot,
+		),
+		Entry("VolumeSnapshot reference does not block object storage retention",
+			newPhysicalBackup(s3Storage),
+			[]client.Object{
+				newMariaDB(testRestoring, &mariadbv1alpha1.BootstrapFrom{
+					VolumeSnapshotRef: &mariadbv1alpha1.LocalObjectReference{
+						Name: testSnapshot,
+					},
+				}, false),
+			},
+			false,
+			testSnapshot,
 		),
 	)
 })

@@ -57,6 +57,13 @@ func (r *PhysicalBackupReconciler) reconcileJobs(ctx context.Context, backup *ma
 		return ctrl.Result{}, fmt.Errorf("error reconciling storage: %v", err)
 	}
 
+	// Retention for S3/Azure Blob and VolumeSnapshots is reconciled by the operator so it
+	// survives restarts and can be retried. PVC/Volume retention is performed by backup Jobs,
+	// which are the only actors able to reach the mounted filesystem.
+	if result, err := r.reconcileRetention(ctx, backup, nil, logger); !result.IsZero() || err != nil {
+		return result, err
+	}
+
 	return r.reconcileTemplate(ctx, backup, len(jobList.Items), logger, func(now time.Time, cronSchedule cron.Schedule) (ctrl.Result, error) {
 		return r.createJob(ctx, backup, mariadb, now, cronSchedule, logger)
 	})
@@ -255,42 +262,56 @@ func (r *PhysicalBackupReconciler) reconcileRBAC(ctx context.Context, backup *ma
 		return fmt.Errorf("error reconciling ServiceAccount: %v", err)
 	}
 
-	if mariadb.IsPointInTimeRecoveryEnabled() {
-		rules := []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{
-					mariadbv1alpha1.GroupVersion.Group,
-				},
-				Resources: []string{
-					"physicalbackups",
-				},
-				Verbs: []string{
-					"get",
-					"patch",
-					"update",
-				},
+	// The backup Job talks to the Kubernetes API to track backup metadata (GTID),
+	// to report retention cleanup status and to detect restorations in progress so
+	// that retention does not delete backups being restored.
+	rules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				mariadbv1alpha1.GroupVersion.Group,
 			},
-		}
-		role, err := r.RBACReconciler.ReconcileRole(ctx, backup.RoleKey(), backup, backup.Spec.InheritMetadata, rules)
-		if err != nil {
-			return fmt.Errorf("error reconciling Role: %v", err)
-		}
+			Resources: []string{
+				"physicalbackups",
+			},
+			Verbs: []string{
+				"get",
+				"patch",
+				"update",
+			},
+		},
+		{
+			APIGroups: []string{
+				mariadbv1alpha1.GroupVersion.Group,
+			},
+			Resources: []string{
+				"mariadbs",
+				"pointintimerecoveries",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+			},
+		},
+	}
+	role, err := r.RBACReconciler.ReconcileRole(ctx, backup.RoleKey(), backup, backup.Spec.InheritMetadata, rules)
+	if err != nil {
+		return fmt.Errorf("error reconciling Role: %v", err)
+	}
 
-		roleRef := rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "Role",
-			Name:     role.Name,
-		}
-		if err := r.RBACReconciler.ReconcileRoleBinding(
-			ctx,
-			backup.RoleBindingKey(),
-			backup,
-			backup.Spec.InheritMetadata,
-			sa,
-			roleRef,
-		); err != nil {
-			return fmt.Errorf("error reconciling RoleBinding: %v", err)
-		}
+	roleRef := rbacv1.RoleRef{
+		APIGroup: rbacv1.GroupName,
+		Kind:     "Role",
+		Name:     role.Name,
+	}
+	if err := r.RBACReconciler.ReconcileRoleBinding(
+		ctx,
+		backup.RoleBindingKey(),
+		backup,
+		backup.Spec.InheritMetadata,
+		sa,
+		roleRef,
+	); err != nil {
+		return fmt.Errorf("error reconciling RoleBinding: %v", err)
 	}
 	return nil
 }

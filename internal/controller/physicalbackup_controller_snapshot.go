@@ -56,8 +56,8 @@ func (r *PhysicalBackupReconciler) reconcileSnapshots(ctx context.Context, backu
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.cleanupSnapshots(ctx, backup, snapshotList, logger); err != nil {
-		return ctrl.Result{}, fmt.Errorf("error cleaning up Jobs: %v", err)
+	if result, err := r.reconcileRetention(ctx, backup, snapshotList, logger); !result.IsZero() || err != nil {
+		return result, fmt.Errorf("error reconciling retention: %v", err)
 	}
 	if result, err := r.waitForProvisionedSnapshots(ctx, backup, snapshotList, logger); !result.IsZero() || err != nil {
 		return result, err
@@ -188,47 +188,6 @@ func (r *PhysicalBackupReconciler) reconcileSnapshotStatus(ctx context.Context, 
 		}); err != nil {
 			logger.Info("error patching status", "err", err)
 		}
-	}
-
-	return nil
-}
-
-func (r *PhysicalBackupReconciler) cleanupSnapshots(ctx context.Context, backup *mariadbv1alpha1.PhysicalBackup,
-	snapshotList *volumesnapshotv1.VolumeSnapshotList, logger logr.Logger) error {
-	if backup.Spec.Schedule == nil {
-		return nil
-	}
-
-	var readySnapshotNames []string
-	for _, snapshot := range snapshotList.Items {
-		if mdbsnapshot.IsVolumeSnapshotReady(&snapshot) {
-			readySnapshotNames = append(readySnapshotNames, snapshot.Name)
-		}
-	}
-	maxRetention := backup.Spec.MaxRetention
-	if maxRetention == (metav1.Duration{}) {
-		maxRetention = mariadbv1alpha1.DefaultPhysicalBackupMaxRetention
-	}
-
-	oldSnapshotNames := r.BackupProcessor.GetOldBackupFiles(readySnapshotNames, maxRetention.Duration, logger)
-	for _, snapshotName := range oldSnapshotNames {
-		key := types.NamespacedName{
-			Name:      snapshotName,
-			Namespace: backup.Namespace,
-		}
-		var snapshot volumesnapshotv1.VolumeSnapshot
-		if err := r.Get(ctx, key, &snapshot); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("error getting VolumeSnapshot \"%s\": %v", key.Name, err)
-		}
-
-		err := r.Delete(ctx, &snapshot)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("error deleting VolumeSnapshot \"%s\": %v", snapshot.Name, err)
-		}
-		logger.V(1).Info("Deleted old Snapshot", "snapshot", key.Name, "physicalbackup", backup.Name)
 	}
 
 	return nil

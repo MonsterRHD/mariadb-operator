@@ -1,0 +1,37 @@
+[
+  {
+    "id": 1,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 2,
+    "passed": false,
+    "reason": "没有完成标记时 CompleteBackupFiles 原样返回全部对象，上传中的备份进入保留集合"
+  },
+  {
+    "id": 3,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 4,
+    "passed": false,
+    "reason": "没有完成标记时恢复选择仍接受对象列表中的备份文件"
+  },
+  {
+    "id": 5,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 6,
+    "passed": true,
+    "reason": ""
+  },
+  {
+    "id": 7,
+    "passed": true,
+    "reason": ""
+  }
+]

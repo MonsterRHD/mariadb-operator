@@ -1350,6 +1350,122 @@ func testTimeFn(t time.Time) func() time.Time {
 	return func() time.Time { return t }
 }
 
+func TestCompleteBackupFiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		fileNames []string
+		wantFiles []string
+	}{
+		{
+			name:      "no files",
+			fileNames: nil,
+			wantFiles: nil,
+		},
+		{
+			name: "legacy storage without markers keeps all files",
+			fileNames: []string{
+				"physicalbackup-20231222130000.xb",
+				"physicalbackup-20231222140000.xb.gz",
+			},
+			wantFiles: []string{
+				"physicalbackup-20231222130000.xb",
+				"physicalbackup-20231222140000.xb.gz",
+			},
+		},
+		{
+			name: "only marked backups are returned",
+			fileNames: []string{
+				"physicalbackup-20231222130000.xb",
+				"physicalbackup-20231222130000.xb.complete",
+				"physicalbackup-20231222140000.xb.gz",
+			},
+			wantFiles: []string{
+				"physicalbackup-20231222130000.xb",
+			},
+		},
+		{
+			name: "markers with prefix are matched",
+			fileNames: []string{
+				"mariadb/physicalbackup-20231222130000.xb",
+				"mariadb/physicalbackup-20231222130000.xb.complete",
+				"mariadb/physicalbackup-20231222140000.xb",
+			},
+			wantFiles: []string{
+				"mariadb/physicalbackup-20231222130000.xb",
+			},
+		},
+		{
+			name: "markers alone return nothing",
+			fileNames: []string{
+				"physicalbackup-20231222130000.xb.complete",
+			},
+			wantFiles: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFiles := CompleteBackupFiles(tt.fileNames)
+			if !reflect.DeepEqual(tt.wantFiles, gotFiles) {
+				t.Fatalf("unexpected complete files, expected: %v got: %v", tt.wantFiles, gotFiles)
+			}
+		})
+	}
+}
+
+func TestPhysicalGetTargetFileWithCompletionMarkers(t *testing.T) {
+	p := NewPhysicalBackupProcessor()
+	// The most recent backup is being uploaded and has no marker yet: it must not be selected.
+	backupFiles := []string{
+		"physicalbackup-20231218155800.xb",
+		"physicalbackup-20231218155800.xb.complete",
+		"physicalbackup-20231218161300.xb",
+	}
+	gotFile, err := p.GetBackupTargetFile(backupFiles, time.Now(), logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wantFile := "physicalbackup-20231218155800.xb"; wantFile != gotFile {
+		t.Fatalf("unexpected target file, expected: %s got: %s", wantFile, gotFile)
+	}
+}
+
+func TestPhysicalGetOldBackupFilesWithCompletionMarkers(t *testing.T) {
+	p := NewPhysicalBackupProcessor()
+	previousNow := now
+	now = testTimeFn(mustParseMariadbDate(t, "20231222221000"))
+	t.Cleanup(func() { now = previousNow })
+
+	backupFiles := []string{
+		"physicalbackup-20231222130000.xb", // old but still uploading: must be preserved
+		"physicalbackup-20231222140000.xb",
+		"physicalbackup-20231222140000.xb.complete",
+	}
+	gotBackups := p.GetOldBackupFiles(backupFiles, 8*time.Hour, logger)
+	wantBackups := []string{
+		"physicalbackup-20231222140000.xb",
+	}
+	if !reflect.DeepEqual(wantBackups, gotBackups) {
+		t.Fatalf("unexpected old backups, expected: %v got: %v", wantBackups, gotBackups)
+	}
+}
+
+func TestLogicalGetTargetFileWithCompletionMarkers(t *testing.T) {
+	p := NewLogicalBackupProcessor()
+	backupFiles := []string{
+		"backup.2023-12-18T15:58:00Z.sql",
+		"backup.2023-12-18T15:58:00Z.sql.complete",
+		"backup.2023-12-18T16:13:00Z.sql",
+	}
+	gotFile, err := p.GetBackupTargetFile(backupFiles, time.Now(), logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wantFile := "backup.2023-12-18T15:58:00Z.sql"; wantFile != gotFile {
+		t.Fatalf("unexpected target file, expected: %s got: %s", wantFile, gotFile)
+	}
+}
+
 func mustParseDate(t *testing.T, dateString string) time.Time {
 	t.Helper()
 	target, err := time.Parse(timeLayout, dateString)

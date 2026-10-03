@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/go-logr/logr"
+	"github.com/hashicorp/go-multierror"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/azure"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/interfaces"
 	mariadbminio "github.com/mariadb-operator/mariadb-operator/v26/pkg/minio"
@@ -14,8 +16,11 @@ import (
 type BackupStorage interface {
 	List(ctx context.Context) ([]string, error)
 	Push(ctx context.Context, fileName string) error
+	// Complete marks a backup file as fully written/uploaded by creating its completion marker.
+	Complete(ctx context.Context, fileName string) error
 	Pull(ctx context.Context, fileName string) error
 	Delete(ctx context.Context, fileName string) error
+	IsNotFound(err error) bool
 	shouldProcessBackupFile(fileName string, logger logr.Logger) bool
 }
 
@@ -52,6 +57,11 @@ func (f *FileSystemBackupStorage) Push(ctx context.Context, fileName string) err
 	return nil // noop
 }
 
+func (f *FileSystemBackupStorage) Complete(ctx context.Context, fileName string) error {
+	markerPath := GetFilePath(f.basePath, MarkerFileName(fileName))
+	return os.WriteFile(markerPath, nil, 0644)
+}
+
 func (f *FileSystemBackupStorage) Pull(ctx context.Context, fileName string) error {
 	return nil // noop
 }
@@ -60,9 +70,18 @@ func (f *FileSystemBackupStorage) Delete(ctx context.Context, fileName string) e
 	return os.Remove(GetFilePath(f.basePath, fileName))
 }
 
+func (f *FileSystemBackupStorage) IsNotFound(err error) bool {
+	return os.IsNotExist(err)
+}
+
 func (f *FileSystemBackupStorage) shouldProcessBackupFile(fileName string, logger logr.Logger) bool {
 	logger.V(1).Info("processing backup file", "file", fileName)
 	if f.processor.IsValidBackupFile(fileName) {
+		return true
+	}
+	// Completion markers of valid backups are listed too, so they can be used to
+	// determine whether a backup upload has finished.
+	if IsBackupMarker(fileName) && f.processor.IsValidBackupFile(strings.TrimSuffix(fileName, BackupCompleteSuffix)) {
 		return true
 	}
 	logger.V(1).Info("ignoring file", "file", fileName)
@@ -72,6 +91,14 @@ func (f *FileSystemBackupStorage) shouldProcessBackupFile(fileName string, logge
 type BlobBackupStorage struct {
 	processor BackupProcessor
 	client    interfaces.BlobStorage
+}
+
+// NewBlobBackupStorage wraps an already configured blob storage client (S3 or Azure Blob).
+func NewBlobBackupStorage(client interfaces.BlobStorage, processor BackupProcessor) BackupStorage {
+	return &BlobBackupStorage{
+		client:    client,
+		processor: processor,
+	}
 }
 
 func NewBlobBackupStorageWithS3(basePath, bucket, endpoint string, processor BackupProcessor,
@@ -104,12 +131,20 @@ func (s *BlobBackupStorage) Delete(ctx context.Context, fileName string) error {
 	return s.client.RemoveWithOptions(ctx, fileName)
 }
 
+func (s *BlobBackupStorage) IsNotFound(err error) bool {
+	return s.client.IsNotFound(err)
+}
+
 func (s *BlobBackupStorage) List(ctx context.Context) ([]string, error) {
 	return s.client.ListObjectsWithOptions(ctx)
 }
 
 func (s *BlobBackupStorage) Push(ctx context.Context, fileName string) error {
 	return s.client.FPutObjectWithOptions(ctx, fileName)
+}
+
+func (s *BlobBackupStorage) Complete(ctx context.Context, fileName string) error {
+	return s.client.PutObjectWithOptions(ctx, MarkerFileName(fileName), strings.NewReader(""), 0)
 }
 
 func (s *BlobBackupStorage) Pull(ctx context.Context, fileName string) error {
@@ -123,4 +158,18 @@ func (s *BlobBackupStorage) shouldProcessBackupFile(fileName string, logger logr
 	}
 	logger.V(1).Info("ignoring file", "file", fileName)
 	return false
+}
+
+// CleanupBackup deletes a backup and its completion marker. Missing objects are
+// not considered errors, making cleanup idempotent and safe to retry.
+func CleanupBackup(ctx context.Context, storage BackupStorage, fileName string) error {
+	var errBundle *multierror.Error
+	if err := storage.Delete(ctx, fileName); err != nil && !storage.IsNotFound(err) {
+		errBundle = multierror.Append(errBundle, fmt.Errorf("error deleting backup %q: %w", fileName, err))
+	}
+	marker := MarkerFileName(fileName)
+	if err := storage.Delete(ctx, marker); err != nil && !storage.IsNotFound(err) {
+		errBundle = multierror.Append(errBundle, fmt.Errorf("error deleting backup marker %q: %w", marker, err))
+	}
+	return errBundle.ErrorOrNil()
 }

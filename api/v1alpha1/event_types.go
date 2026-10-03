@@ -68,6 +68,11 @@ const (
 	// ReasonVolumeSnapshotCreated indicates that a VolumeSnapshot has been scheduled.
 	ReasonVolumeSnapshotCreated = "VolumeSnapshotCreated"
 
+	// ReasonRetentionDeleteFailed indicates that an old backup could not be deleted by the retention policy.
+	ReasonRetentionDeleteFailed = "RetentionDeleteFailed"
+	// ReasonRetentionBlocked indicates that retention cleanup was skipped because an in-progress restoration references the backup.
+	ReasonRetentionBlocked = "RetentionBlocked"
+
 	// ReasonMariaDBNotReady indicates that the MariaDB resource is not ready.
 	ReasonMariaDBNotReady = "MariaDBNotReady"
 

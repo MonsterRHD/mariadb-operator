@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/hashicorp/go-multierror"
 	mariadbv1alpha1 "github.com/mariadb-operator/mariadb-operator/v26/api/v1alpha1"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/azure"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/backup"
@@ -20,6 +22,7 @@ import (
 	mdbminio "github.com/mariadb-operator/mariadb-operator/v26/pkg/minio"
 	"github.com/mariadb-operator/mariadb-operator/v26/pkg/replication"
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -167,19 +170,17 @@ var RootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		logger.Info("cleaning up old backups")
-		backupNames, err := backupStorage.List(ctx)
-		if err != nil {
-			logger.Error(err, "error listing backup files")
+		// The marker is only written once the backup file has been fully uploaded,
+		// so listings used by restores and retention never see half-uploaded backups.
+		logger.Info("marking target backup as complete", "file", backupTargetFile)
+		if err := backupStorage.Complete(ctx, backupTargetFile); err != nil {
+			logger.Error(err, "error marking target backup as complete", "file", backupTargetFile)
 			os.Exit(1)
 		}
-		oldBackups := backupProcessor.GetOldBackupFiles(backupNames, maxRetention, logger.WithName("backup-cleanup"))
-		logger.Info("old backups to delete", "backups", len(oldBackups))
-		for _, backup := range oldBackups {
-			logger.V(1).Info("deleting old backup", "backup", backup)
-			if err := backupStorage.Delete(ctx, backup); err != nil {
-				logger.Error(err, "error removing old backup", "backup", backup)
-			}
+
+		if err := cleanupOldBackups(ctx, backupStorage, backupProcessor, logger.WithName("backup-cleanup")); err != nil {
+			logger.Error(err, "error cleaning up old backups")
+			os.Exit(1)
 		}
 
 		if err := cleanupFile(backupTargetFile, logger.WithName("cleanup")); err != nil && os.IsNotExist(err) {
@@ -192,6 +193,171 @@ var RootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 	},
+}
+
+// cleanupOldBackups deletes backups older than the retention policy.
+// Physical backups are protected: deletions are skipped while a restoration references the
+// PhysicalBackup, and the outcome is tracked on the PhysicalBackup status so the operator
+// can retry failed cleanups.
+func cleanupOldBackups(ctx context.Context, backupStorage backup.BackupStorage, backupProcessor backup.BackupProcessor,
+	logger logr.Logger) error {
+	logger.Info("cleaning up old backups")
+	backupNames, err := backupStorage.List(ctx)
+	if err != nil {
+		return fmt.Errorf("error listing backup files: %w", err)
+	}
+	oldBackups := backupProcessor.GetOldBackupFiles(backupNames, maxRetention, logger)
+	logger.Info("old backups to delete", "backups", len(oldBackups))
+	if len(oldBackups) == 0 {
+		return nil
+	}
+
+	if backupContentType != string(mariadbv1alpha1.BackupContentTypePhysical) {
+		// Logical backups: keep the historical behavior, log deletion errors without failing.
+		for _, oldBackup := range oldBackups {
+			logger.V(1).Info("deleting old backup", "backup", oldBackup)
+			if err := backup.CleanupBackup(ctx, backupStorage, oldBackup); err != nil {
+				logger.Error(err, "error removing old backup", "backup", oldBackup)
+			}
+		}
+		return nil
+	}
+
+	k8sClient, pb, err := getPhysicalBackupForRetention()
+	if err != nil {
+		// Without Kubernetes access we cannot tell whether a restoration is in progress,
+		// so deletion is deferred to the next run / operator reconciliation.
+		logger.Error(err, "error getting PhysicalBackup, deferring retention cleanup")
+		return nil
+	}
+
+	blocked, reason, err := physicalBackupRetentionBlocked(ctx, k8sClient, pb)
+	if err != nil {
+		logger.Error(err, "error checking restorations referencing the PhysicalBackup, deferring retention cleanup")
+		_ = patchPhysicalBackupRetentionCondition(ctx, k8sClient, pb,
+			metav1.ConditionFalse, mariadbv1alpha1.ConditionReasonRetentionFailed, err.Error())
+		return nil
+	}
+	if blocked {
+		logger.Info("skipping retention cleanup: restoration in progress", "reason", reason)
+		_ = patchPhysicalBackupRetentionCondition(ctx, k8sClient, pb,
+			metav1.ConditionFalse, mariadbv1alpha1.ConditionReasonRetentionBlocked,
+			fmt.Sprintf("Retention cleanup is blocked by an in-progress restoration: %s", reason))
+		return nil
+	}
+
+	var delErr *multierror.Error
+	for _, oldBackup := range oldBackups {
+		logger.V(1).Info("deleting old backup", "backup", oldBackup)
+		if err := backup.CleanupBackup(ctx, backupStorage, oldBackup); err != nil {
+			logger.Error(err, "error removing old backup", "backup", oldBackup)
+			delErr = multierror.Append(delErr, err)
+		}
+	}
+	if delErr.ErrorOrNil() != nil {
+		_ = patchPhysicalBackupRetentionCondition(ctx, k8sClient, pb,
+			metav1.ConditionFalse, mariadbv1alpha1.ConditionReasonRetentionFailed, delErr.Error())
+		// The backup itself succeeded; do not fail the Job. The operator retries the cleanup.
+		return nil
+	}
+	_ = patchPhysicalBackupRetentionCondition(ctx, k8sClient, pb,
+		metav1.ConditionTrue, mariadbv1alpha1.ConditionReasonRetentionHealthy, "Old backups successfully cleaned up")
+	return nil
+}
+
+// getPhysicalBackupForRetention returns the Kubernetes client and the PhysicalBackup tracked
+// by this backup Job. It is only available for physical backups, where the operator always
+// passes the PhysicalBackup name and namespace.
+func getPhysicalBackupForRetention() (client.Client, *mariadbv1alpha1.PhysicalBackup, error) {
+	if physicalBackupName == "" || physicalBackupNamespace == "" {
+		return nil, nil, errors.New("physical backup name or namespace is not set")
+	}
+	k8sClient, err := getK8sClient()
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting Kubernetes client: %w", err)
+	}
+	key := types.NamespacedName{
+		Name:      physicalBackupName,
+		Namespace: physicalBackupNamespace,
+	}
+	var pb mariadbv1alpha1.PhysicalBackup
+	if err := k8sClient.Get(context.Background(), key, &pb); err != nil {
+		return nil, nil, fmt.Errorf("error getting PhysicalBackup: %w", err)
+	}
+	return k8sClient, &pb, nil
+}
+
+// physicalBackupRetentionBlocked reports whether an in-progress MariaDB restoration consumes
+// backups produced by the PhysicalBackup (either directly, via point-in-time recovery, or from
+// the same remote storage location).
+func physicalBackupRetentionBlocked(ctx context.Context, c client.Client,
+	pb *mariadbv1alpha1.PhysicalBackup) (bool, string, error) {
+	var mariadbList mariadbv1alpha1.MariaDBList
+	if err := c.List(ctx, &mariadbList, client.InNamespace(pb.Namespace)); err != nil {
+		return false, "", fmt.Errorf("error listing MariaDBs: %w", err)
+	}
+	for i := range mariadbList.Items {
+		mariadb := &mariadbList.Items[i]
+		if mariadb.IsInitialized() || mariadb.Spec.BootstrapFrom == nil {
+			continue
+		}
+		bootstrap := mariadb.Spec.BootstrapFrom
+
+		if bootstrap.BackupRef != nil &&
+			bootstrap.BackupRef.Kind == mariadbv1alpha1.PhysicalBackupKind &&
+			bootstrap.BackupRef.Name == pb.Name {
+			return true, fmt.Sprintf("MariaDB %q is being restored from this PhysicalBackup", mariadb.Name), nil
+		}
+		if bootstrap.PointInTimeRecoveryRef != nil {
+			var pitr mariadbv1alpha1.PointInTimeRecovery
+			key := types.NamespacedName{
+				Name:      bootstrap.PointInTimeRecoveryRef.Name,
+				Namespace: mariadb.Namespace,
+			}
+			if err := c.Get(ctx, key, &pitr); err != nil {
+				return false, "", fmt.Errorf("error getting PointInTimeRecovery %q: %w", key.Name, err)
+			}
+			if pitr.Spec.PhysicalBackupRef.Name == pb.Name {
+				return true, fmt.Sprintf("MariaDB %q point-in-time recovery uses this PhysicalBackup", mariadb.Name), nil
+			}
+		}
+		if pb.Spec.Storage.S3 != nil && bootstrap.S3 != nil &&
+			pb.Spec.Storage.S3.Bucket == bootstrap.S3.Bucket &&
+			pb.Spec.Storage.S3.Endpoint == bootstrap.S3.Endpoint &&
+			pb.Spec.Storage.S3.Prefix == bootstrap.S3.Prefix {
+			return true, fmt.Sprintf("MariaDB %q is being restored from the same S3 storage", mariadb.Name), nil
+		}
+		if pb.Spec.Storage.AzureBlob != nil && bootstrap.AzureBlob != nil &&
+			pb.Spec.Storage.AzureBlob.ContainerName == bootstrap.AzureBlob.ContainerName &&
+			pb.Spec.Storage.AzureBlob.ServiceURL == bootstrap.AzureBlob.ServiceURL &&
+			pb.Spec.Storage.AzureBlob.Prefix == bootstrap.AzureBlob.Prefix {
+			return true, fmt.Sprintf("MariaDB %q is being restored from the same Azure Blob storage", mariadb.Name), nil
+		}
+	}
+	return false, "", nil
+}
+
+func patchPhysicalBackupRetentionCondition(ctx context.Context, c client.Client, pb *mariadbv1alpha1.PhysicalBackup,
+	status metav1.ConditionStatus, reason, message string) error {
+	key := types.NamespacedName{
+		Name:      pb.Name,
+		Namespace: pb.Namespace,
+	}
+	var current mariadbv1alpha1.PhysicalBackup
+	if err := c.Get(ctx, key, &current); err != nil {
+		return fmt.Errorf("error getting PhysicalBackup: %w", err)
+	}
+	patch := client.MergeFrom(current.DeepCopy())
+	current.Status.SetCondition(metav1.Condition{
+		Type:    mariadbv1alpha1.ConditionTypeRetention,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+	if err := c.Status().Patch(ctx, &current, patch); err != nil {
+		return fmt.Errorf("error patching PhysicalBackup retention condition: %w", err)
+	}
+	return nil
 }
 
 func newContext() (context.Context, context.CancelFunc) {

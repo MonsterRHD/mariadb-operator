@@ -327,7 +327,8 @@ func (r *PhysicalBackupReconciler) SetupWithManager(ctx context.Context, mgr ctr
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
-		WithOptions(opts)
+		WithOptions(opts).
+		WatchesRawSource(r.enqueuePhysicalBackupsOnStart(mgr))
 	if err := r.indexJobs(ctx, mgr); err != nil {
 		return fmt.Errorf("error indexing PhysicalBackup Jobs: %v", err)
 	}

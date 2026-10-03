@@ -350,37 +350,17 @@ func (r *MariaDBReconciler) getABSClient(ctx context.Context, pitr *mariadbv1alp
 	if abs == nil {
 		return nil, fmt.Errorf("error getting azure blob storage client. No abs config found")
 	}
-
-	opts := []azure.AzBlobOpt{
-		azure.WithPrefix(abs.Prefix),
-		azure.WithAccountName(abs.StorageAccountName),
-	}
-
-	// If `storageAccountKey` is not set, we rely on DefaultAzureCredential
-	if abs.StorageAccountKey != nil {
-		accountKey, err := r.RefResolver.SecretKeyRef(ctx, *abs.StorageAccountKey, pitr.Namespace)
-		if err != nil {
-			return nil, fmt.Errorf("error getting CA cert: %v", err)
-		}
-		opts = append(opts, azure.WithAccountKey(accountKey))
-	}
-
-	tls := ptr.Deref(abs.TLS, mariadbv1alpha1.TLSConfig{})
-	if tls.Enabled {
-		opts = append(opts, azure.WithTLSEnabled(true))
-		caCertBytes, err := r.RefResolver.SecretKeyRef(ctx, *abs.TLS.CASecretKeyRef, pitr.Namespace)
-		if err != nil {
-			return nil, fmt.Errorf("error getting CA cert: %v", err)
-		}
-		opts = append(opts, azure.WithTLSCACertBytes([]byte(caCertBytes)))
-	}
-
-	return azure.NewAzBlobClient(
+	client, err := azure.NewAzBlobClientFromConfig(
+		ctx,
+		*r.RefResolver,
+		*abs,
 		"",
-		abs.ContainerName,
-		abs.ServiceURL,
-		opts...,
+		pitr.Namespace,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("error creating Azure Blob client: %w", err)
+	}
+	return client, nil
 }
 
 // getS3Client retrieves a configured S3 client

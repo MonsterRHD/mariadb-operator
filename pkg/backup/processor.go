@@ -27,6 +27,48 @@ type backupDiff struct {
 	diff     time.Duration
 }
 
+// BackupCompleteSuffix is appended to backup files once they have been fully
+// written/uploaded. A backup file without its marker is considered in progress
+// and is neither selected for restoration nor deleted by retention.
+const BackupCompleteSuffix = ".complete"
+
+// MarkerFileName returns the completion marker name for a backup file.
+func MarkerFileName(fileName string) string {
+	return fileName + BackupCompleteSuffix
+}
+
+// IsBackupMarker reports whether the file name is a completion marker.
+func IsBackupMarker(fileName string) bool {
+	return strings.HasSuffix(path.Base(fileName), BackupCompleteSuffix)
+}
+
+// CompleteBackupFiles keeps the backups whose completion marker is present.
+// Markers themselves are never returned. When the listing does not contain any
+// marker, the input is returned unchanged: storages produced before markers
+// existed (or storage types that cannot hold markers) must keep working.
+func CompleteBackupFiles(fileNames []string) []string {
+	markers := map[string]struct{}{}
+	for _, fileName := range fileNames {
+		if IsBackupMarker(fileName) {
+			markers[fileName] = struct{}{}
+		}
+	}
+	if len(markers) == 0 {
+		return fileNames
+	}
+
+	var completeFiles []string
+	for _, fileName := range fileNames {
+		if IsBackupMarker(fileName) {
+			continue
+		}
+		if _, ok := markers[MarkerFileName(fileName)]; ok {
+			completeFiles = append(completeFiles, fileName)
+		}
+	}
+	return completeFiles
+}
+
 // LogicalBackupProcessor processes logical backups.
 type LogicalBackupProcessor struct{}
 
@@ -43,7 +85,7 @@ func (p *LogicalBackupProcessor) GetBackupTargetFile(backupFileNames []string, t
 	)
 	var backupDiffs []backupDiff
 
-	for _, file := range backupFileNames {
+	for _, file := range CompleteBackupFiles(backupFileNames) {
 		backupDate, err := p.parseDateInBackupFile(file)
 		if err != nil {
 			logger.Error(err, "error parsing backup date. Skipping", "backup", file)
@@ -77,7 +119,7 @@ func (p *LogicalBackupProcessor) GetBackupTargetFile(backupFileNames []string, t
 func (p *LogicalBackupProcessor) GetOldBackupFiles(backupFileNames []string, maxRetention time.Duration, logger logr.Logger) []string {
 	var oldBackups []string
 	now := now()
-	for _, file := range backupFileNames {
+	for _, file := range CompleteBackupFiles(backupFileNames) {
 		backupDate, err := p.parseDateInBackupFile(file)
 		if err != nil {
 			logger.Error(err, "error parsing backup date. Skipping", "file", file)
@@ -202,7 +244,7 @@ func (p *PhysicalBackupProcessor) GetBackupTargetFile(backupFileNames []string, 
 	)
 	var backupDiffs []backupDiff
 
-	for _, file := range backupFileNames {
+	for _, file := range CompleteBackupFiles(backupFileNames) {
 		backupDate, err := p.parseDateInBackupFile(file)
 		if err != nil {
 			logger.Error(err, "error parsing backup date. Skipping", "backup", file)
@@ -236,7 +278,7 @@ func (p *PhysicalBackupProcessor) GetBackupTargetFile(backupFileNames []string, 
 func (p *PhysicalBackupProcessor) GetOldBackupFiles(backupFileNames []string, maxRetention time.Duration, logger logr.Logger) []string {
 	var oldBackups []string
 	now := now()
-	for _, file := range backupFileNames {
+	for _, file := range CompleteBackupFiles(backupFileNames) {
 		backupDate, err := p.parseDateInBackupFile(file)
 		if err != nil {
 			logger.Error(err, "error parsing backup date. Skipping", "file", file)

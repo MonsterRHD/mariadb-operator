@@ -13,6 +13,8 @@ const (
 	// ConditionTypeGaleraInitialized indicates that the cluster has been successfully initialized.
 	ConditionTypeGaleraInitialized string = "GaleraInitialized"
 	ConditionTypeComplete          string = "Complete"
+	// ConditionTypeRetention indicates whether old backups are being cleaned up according to the retention policy.
+	ConditionTypeRetention string = "Retention"
 	// ConditionTypeStorageResized indicates that the storage has been successfully resized.
 	ConditionTypeStorageResized string = "StorageResized"
 	// ConditionTypeUpdated indicates that an update has been successfully completed.
@@ -78,6 +80,10 @@ const (
 	ConditionReasonSnapshotFailed      string = "SnapshotFailed"
 	ConditionReasonSnapshotInProgress  string = "SnapshotInProgress"
 	ConditionReasonSnapshotNotComplete string = "SnapshotNotComplete"
+
+	ConditionReasonRetentionHealthy string = "RetentionHealthy"
+	ConditionReasonRetentionBlocked string = "RetentionBlocked"
+	ConditionReasonRetentionFailed  string = "RetentionDeleteFailed"
 
 	ConditionReasonCronJobScheduled string = "CronJobScheduled"
 	ConditionReasonCronJobFailed    string = "CronJobFailed"

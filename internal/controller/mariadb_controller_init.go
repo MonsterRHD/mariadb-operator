@@ -90,6 +90,10 @@ func (r *MariaDBReconciler) reconcilePhysicalBackupInit(ctx context.Context, mar
 		}
 	}
 
+	if result, err := r.waitForPhysicalBackupComplete(ctx, bootstrap, mariadb, logger); !result.IsZero() || err != nil {
+		return result, err
+	}
+
 	if err := r.patchStatus(ctx, mariadb, func(status *mariadbv1alpha1.MariaDBStatus) error {
 		condition.SetInitializing(status)
 		return nil
@@ -152,6 +156,28 @@ func (r *MariaDBReconciler) reconcilePhysicalBackupInit(ctx context.Context, mar
 	// Requeue to track replication status
 	if mariadb.IsReplicationEnabled() {
 		return ctrl.Result{Requeue: true}, nil //nolint:staticcheck // Requeue gives exponential backoff, which RequeueAfter cannot express.
+	}
+	return ctrl.Result{}, nil
+}
+
+// waitForPhysicalBackupComplete holds the init process until the referenced PhysicalBackup
+// has completed, i.e. the backup Job has finished and the backup object has been fully
+// uploaded. Restoring while the upload is still in progress could result in a missing
+// or half-uploaded backup.
+func (r *MariaDBReconciler) waitForPhysicalBackupComplete(ctx context.Context,
+	bootstrap *mariadbv1alpha1.BootstrapFrom, mariadb *mariadbv1alpha1.MariaDB, logger logr.Logger) (ctrl.Result, error) {
+	if bootstrap == nil || bootstrap.BackupRef == nil ||
+		bootstrap.BackupRef.Kind != mariadbv1alpha1.PhysicalBackupKind {
+		return ctrl.Result{}, nil
+	}
+
+	physicalBackup, err := r.RefResolver.PhysicalBackup(ctx, bootstrap.BackupRef.LocalReference(), mariadb.Namespace)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error getting PhysicalBackup: %v", err)
+	}
+	if !physicalBackup.IsComplete() {
+		logger.Info("PhysicalBackup not complete, deferring restoration", "physicalbackup", physicalBackup.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }

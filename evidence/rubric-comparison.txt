@@ -1,0 +1,13 @@
+project-07｜MariaDB 物理备份清理的活动引用保护
+题目 ID：mariadb-operator-mariadb-operator-802578ff-0b35-4a04-adff-0143946ed809｜Harness：Trae｜有效轮数：134｜完成度：部分完成｜收录：长程题
+关键验证：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+
+Rubric ID：1｜状态：通过｜期望行为：活动引用阻止删除结果可观察｜实际观察：引用保护、删除条件、启动重排和逻辑备份分支由专项测试与控制器代码验证｜直接证据：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+Rubric ID：2｜状态：未通过｜期望行为：未完成对象不进入保留计算｜实际观察：没有完成标记时 CompleteBackupFiles 原样返回全部对象，上传中的备份进入保留集合｜直接证据：pkg/backup/processor.go CompleteBackupFiles｜原因：没有完成标记时 CompleteBackupFiles 原样返回全部对象，上传中的备份进入保留集合｜影响：保留计算会选择尚未完成上传的物理备份｜证据位置：pkg/backup/processor.go CompleteBackupFiles
+Rubric ID：3｜状态：通过｜期望行为：删除失败保留可重试条件结果可观察｜实际观察：引用保护、删除条件、启动重排和逻辑备份分支由专项测试与控制器代码验证｜直接证据：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+Rubric ID：4｜状态：未通过｜期望行为：恢复只读完整输入结果可观察｜实际观察：没有完成标记时恢复选择仍接受对象列表中的备份文件｜直接证据：pkg/backup/processor.go CompleteBackupFiles 与恢复选择调用链｜原因：没有完成标记时恢复选择仍接受对象列表中的备份文件｜影响：恢复流程可读取上传未完成的输入｜证据位置：pkg/backup/processor.go CompleteBackupFiles 与恢复选择调用链
+Rubric ID：5｜状态：通过｜期望行为：CR 条件反映真实结果结果可观察｜实际观察：引用保护、删除条件、启动重排和逻辑备份分支由专项测试与控制器代码验证｜直接证据：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+Rubric ID：6｜状态：通过｜期望行为：重启继续清理结果可观察明确｜实际观察：引用保护、删除条件、启动重排和逻辑备份分支由专项测试与控制器代码验证｜直接证据：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+Rubric ID：7｜状态：通过｜期望行为：逻辑备份 reconcile 不变｜实际观察：引用保护、删除条件、启动重排和逻辑备份分支由专项测试与控制器代码验证｜直接证据：备份专项用例通过且 go build ./... 通过；审计 pkg/backup/processor.go 与控制器恢复路径
+
+Prompt-Rubric 对齐：P1…Pn 与冻结 Rubric 逐项对应，无额外验收要求。
